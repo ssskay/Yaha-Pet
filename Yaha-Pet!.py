@@ -153,12 +153,13 @@ class Character(QWidget):
         self.modified_animationlist = totalanimations.copy()
         #Valid random animations
         if self.name in self.modified_animationlist:
-            try:
-                self.modified_animationlist[self.name].remove("walkright")
-                self.modified_animationlist[self.name].remove("walkleft") # Remove unwanted random animations
-                self.modified_animationlist[self.name].remove("falling")
-            except ValueError:
-                pass
+            unwanted_random_animations = ["walkright", "walkleft", "falling", "jump"]
+            for name in unwanted_random_animations:
+                try:
+                    self.modified_animationlist[self.name].remove(name)
+                    print("Removed: ",name," from random animations")
+                except ValueError:
+                    continue
 
         #Direction walk-animation variables
         self.direction : int = 0

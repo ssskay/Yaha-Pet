@@ -130,15 +130,18 @@ class Character(QWidget):
             if(sprite.name[:7] == "grabbed"):
                 spritename = sprite.name[:7]
             if(sprite.name[:4] == "jump"):
+                
                 spritename = sprite.name.split('.')[0]
+                
             if(spritename != ""):
                 img = self.convert_sprite_to_pixmap(sprite)
                 if(spritename not in self.sprites):
                     self.sprites[spritename] = []
                 self.sprites[spritename].append(img)
+                
             else:
                 pass 
-            
+       
             
         #print(self.sprites["spawn"])
 
@@ -224,8 +227,8 @@ class Character(QWidget):
             self.move(self.clamp_to_screen(0,0))
         if(not self.onanimation and not self.drag):
             roll = random.randrange(0,100)
-            if(roll<=10):
-                self.start_jumpanimation(screen_width, screen_height)
+            if(roll<=100):
+                self.start_jumpanimation(screen_width)
             else:
                 if(roll> 10 and roll<=50): #If roll<=X, do walking or jump animation
                     self.start_walkanimation()
@@ -244,7 +247,7 @@ class Character(QWidget):
                         if(len(self.modified_animationlist[self.name])>0):
                             chosen_animation = random.choice(self.modified_animationlist[self.name])
                             self.start_anim(chosen_animation)
-    def start_jumpanimation(self, screen_width, screen_height):
+    def start_jumpanimation(self, screen_width):
         self.onanimation = True
         direction_roll = random.randint(0,1)
         if(direction_roll == 1 and self.pos().x()>= screen_width- 100): # if right and too close to border, go left instead
@@ -264,8 +267,10 @@ class Character(QWidget):
         distance_x = abs(end_range_x - self.pos().x())
         if(direction_roll == 0): # Calculate the point to travel to in the first half of the jump
             first_half_x_point = abs(end_range_x + int(distance_x/2))
+            chosen_direction = "jumpleft"
         else:
             first_half_x_point = abs(end_range_x - int(distance_x/2))
+            chosen_direction = "jumpright"
 
         time = jump_height*10
         self.animation = QPropertyAnimation(self, b"pos")
@@ -276,9 +281,14 @@ class Character(QWidget):
         self.animation.setEndValue(QPoint(first_half_x_point, self.pos().y() - jump_height - self.height()))
         self.animation.finished.connect(lambda: self.end_jumpanimation(time, end_range_x))
         
-        
-        if("jump" in self.frames):
-            frames = self.frames.get("jump",[])
+        jump_dir_left = Path(resource_path("assets/{self.name}/animations/jumpleft"))
+        jump_dir_right = Path(resource_path("assets/{self.name}/animations/jumpright"))
+        if(not "jumpleft" in self.frames and jump_dir_left.exists()):
+            self.preload_animations("jumpleft")
+        if(not "jumpright" in self.frames and jump_dir_right.exists()):
+            self.preload_animations("jumpright")
+        if(chosen_direction in self.frames):
+            frames = self.frames.get(chosen_direction,[])
             total_frames = len(frames)
             if(total_frames == 0):
                 return
@@ -287,10 +297,15 @@ class Character(QWidget):
             self.jump_frame_timer.start(time_for_frame)
             self.jump_frame_timer.timeout.connect(lambda: self.next_jump_frame(frames))
         else:
-            if(direction_roll == 0): 
+            if(direction_roll == 0 and "jumpleft" in self.sprites):
                 jump_sprite = self.sprites["jumpleft"][0]
-            else:   
-                jump_sprite = self.sprites["jumpright"][0]
+            else:
+                if("jumpright" in self.sprites): 
+                    jump_sprite = self.sprites["jumpright"][0]
+                else:
+                    print("jump sprites not found")
+                    self.stop_current_animation()
+                    return
             self.setLabelImage(jump_sprite)
             self.animation.start()
             
@@ -332,11 +347,27 @@ class Character(QWidget):
             start_range = self.pos().x() + min_movement_distance
             end_range = screen_width-self.width()
 
+        # Make sure we have at least one walk animation loaded.
+        left_walk_dir = Path(resource_path(f'assets/{self.name}/animations/walkleft'))
+        right_walk_dir = Path(resource_path(f'assets/{self.name}/animations/walkright'))
+        if "walkleft" not in self.frames and left_walk_dir.exists():
+            self.preload_animations("walkleft")
+        if "walkright" not in self.frames and right_walk_dir.exists():
+            self.preload_animations("walkright")
+        
+        # If none of the walk animations exist, there is nothing to do.
+        if "walkleft" not in self.frames and "walkright" not in self.frames:
+            return
+
         if(start_range<end_range  ):
             if(self.roll_direction == 0):
                 self.start_anim("walkleft")
+                chosen_walk_animation = "walkleft" if "walkleft" in self.frames else "walkright"
             else:
                 self.start_anim("walkright")
+                chosen_walk_animation = "walkright" if "walkright" in self.frames else "walkleft"
+
+            self.start_anim(chosen_walk_animation)
             possible_direction = random.randrange(start_range,end_range) 
             
             self.walktocoord = QPoint(possible_direction, self.pos().y())
@@ -442,22 +473,27 @@ class Character(QWidget):
         self.frames[animname] = loaded # Set the image list to the corresponding animation
         self.anim_idx[animname] = 0
 
-        if(animname[:4] == "walk"):
+        if(animname[:4] == "walk" or animname[:4] == "jump"):
             reverse_loaded: list[tuple[str, QPixmap]] = []
             reversed_filename: str;
-            
-            if(animname == "walkleft"):
-                reversed_filename = "walkright"
+            print("REVERSING::: ")
+            print(animname)
+            print(animname[-4:])
+            if(animname[-5:]) == "right":
+                reversed_filename = animname[:4]+"left"
             else:
-                reversed_filename = "walkleft"
+                reversed_filename = animname[:4]+"right"
             print("reversed: ", reversed_filename)
-            for name, pixmap in loaded:
-                pixmap = pixmap.toImage()
-                pixmap = QPixmap.fromImage(pixmap.mirrored(True, False))
-                reverse_loaded.append((name, pixmap))
-            print("reversed")
-            self.frames[reversed_filename] = reverse_loaded
-            self.anim_idx[reversed_filename] = 0
+            if(reversed_filename in self.frames):
+                pass
+            else:
+                for name, pixmap in loaded:
+                    pixmap = pixmap.toImage()
+                    pixmap = QPixmap.fromImage(pixmap.mirrored(True, False))
+                    reverse_loaded.append((name, pixmap))
+                print("reversed")
+                self.frames[reversed_filename] = reverse_loaded
+                self.anim_idx[reversed_filename] = 0
         
     def preload_allanimations(self):
         for animation in totalanimations[self.name]:

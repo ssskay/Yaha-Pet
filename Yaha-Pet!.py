@@ -1,7 +1,8 @@
 import os
 import sys
+import json
 from PyQt6.QtWidgets import QApplication, QWidget, QSystemTrayIcon, QMenu, QLabel
-from PyQt6.QtCore import Qt, QSize, QPoint, QUrl, QPropertyAnimation, QTimer
+from PyQt6.QtCore import Qt, QSize, QPoint, QUrl, QPropertyAnimation, QTimer, QEasingCurve
 from PyQt6.QtGui import QIcon, QGuiApplication, QPixmap, QAction
 from PyQt6.QtMultimedia import QSoundEffect
 from pathlib import Path
@@ -40,6 +41,12 @@ def resize_to_current_screen():
     screen_height = screen_size.height()
     yahawindow.resize(screen_width, screen_height)
 
+def get_taskbar_height():
+    
+    screen = QGuiApplication.primaryScreen()
+    available_height = screen.availableGeometry().height()
+    
+    return available_height # The available height is the taskbar's height
 
 def say_hi_message():
     if(len(characters_names)>0):
@@ -115,18 +122,15 @@ class Character(QWidget):
 
     
         for sprite in Path(resource_path(f'assets/{self.name}/sprites')).iterdir():
-            print(sprite.name)
-            print(sprite.name[:5])
             spritename = ""
-            if(sprite.name[:5] == "spawn"):
-                
+            if(sprite.name[:5] == "spawn"):  
                 spritename = sprite.name[:5]
-                
-                print("appended")
             if(sprite.name[:7] == "falling"):
                 spritename = sprite.name[:7]
             if(sprite.name[:7] == "grabbed"):
                 spritename = sprite.name[:7]
+            if(sprite.name[:4] == "jump"):
+                spritename = sprite.name.split('.')[0]
             if(spritename != ""):
                 img = self.convert_sprite_to_pixmap(sprite)
                 if(spritename not in self.sprites):
@@ -141,6 +145,10 @@ class Character(QWidget):
         #Setting the timer for random animations
         self.frame_timer = QTimer()
         self.frame_timer.timeout.connect(self.next_frame)
+
+        #Setting the timer for jump animation
+        self.jump_frame_timer = QTimer()
+        
 
         self.modified_animationlist = totalanimations.copy()
         #Valid random animations
@@ -182,8 +190,10 @@ class Character(QWidget):
         self.randomtimer.start(random_time)
         self.randomtimer.timeout.connect(self.try_animation)
             
-    def start_anim(self, animname: str, fps: int = 40):
-        
+    def start_anim(self, animname: str):
+        animation_properties = config_data.get(self.name, {}).get("animations", {}).get(animname, {})
+        fps = animation_properties.get("fps", 40)
+        print("Using ",fps," FPS on '",animname,"'/ animation.")
         if(not self.onanimation and not self.drag):
             self.before_anim_pos = self.pos()
             if animname not in self.frames: # If animation hasnt loaded yet
@@ -213,58 +223,148 @@ class Character(QWidget):
             self.move(self.clamp_to_screen(0,0))
         if(not self.onanimation and not self.drag):
             roll = random.randrange(0,100)
-            if(roll<=50): #If roll<=X, do walking animation
-                min_walk_distance = 100
-                
-                
-                self.roll_direction = random.randrange(0, 2) #If 0 go left, if 1 go right
-                
-                if(self.roll_direction == 0):
-                    start_range = 0
-                    end_range = self.pos().x() - min_walk_distance
-                
-                else:
-                    start_range = self.pos().x() + min_walk_distance
-                    end_range = screen_width-self.width()
-                    
-                if(start_range<end_range):
-                    if(self.roll_direction == 0):
-                        self.start_anim("walkleft")
-                    else:
-                        self.start_anim("walkright")
-                    possible_direction = random.randrange(start_range,end_range) # Leave some pixels as margin
-                    self.walktocoord = QPoint(possible_direction, self.pos().y())
-                
-                else: # If invalid range, dont start any animation and try again later.
-                    return
-            
-                time = int(abs(self.walktocoord.x()-self.pos().x()))
-                time = int(5*time) # Convert to int to avoid bugs
-                self.animation = QPropertyAnimation(self, b"pos")
-                self.animation.setDuration(time) # Time it takes the animation to be completed
-                self.animation.setTargetObject(self) # Widget as the target for the animation
-                self.animation.setStartValue(QPoint(self.pos())) # Current pos as start
-                self.animation.setEndValue(QPoint(self.walktocoord.x(), self.pos().y())) # Same y coord.
-                self.animation.finished.connect(self.stop_current_animation)
-                self.animation.finished.connect(self.stop_current_sound) 
-                self.animation.start()
+            if(roll<=10):
+                self.start_jumpanimation(screen_width, screen_height)
             else:
-                if(len(self.modified_animationlist[self.name])>0):
-                    chosen_animation = random.choice(self.modified_animationlist[self.name])
-                    self.start_anim(chosen_animation)
-
-    def next_frame(self):
+                if(roll> 10 and roll<=50): #If roll<=X, do walking or jump animation
+                    self.start_walkanimation()
+                else:
+                    if(roll>=95):
+                        pass
+                    #     selected_character = None
+                    #     if(available_coop_animations[self.name]):
+                    #         for character in available_coop_animations[self.name]:
+                    #             if(character.getOnAnimation() == False):
+                    #                 selected_character = character
+                    #                 break
+                    #     else:
+                    #         self.try_animation()
+                    else:
+                        if(len(self.modified_animationlist[self.name])>0):
+                            chosen_animation = random.choice(self.modified_animationlist[self.name])
+                            self.start_anim(chosen_animation)
+    def start_jumpanimation(self, screen_width, screen_height):
+        self.onanimation = True
+        direction_roll = random.randint(0,1)
+        if(direction_roll == 1 and self.pos().x()>= screen_width- 100): # if right and too close to border, go left instead
+            direction_roll = 0
+        if(direction_roll == 0 and not self.pos().x() <= 100 ): # If 0 and not too close to border go left
+            end_range_x = self.pos().x() - random.randint(0,100) 
+            if(end_range_x > screen_width):
+                end_range_x = screen_width - 1
+            
+        else:
+            end_range_x = self.pos().x() +  random.randint(0,100)
+            if(end_range_x < 0):
+                end_range_x = 1
         
+        jump_height = random.randint(50, 300)
+
+        distance_x = abs(end_range_x - self.pos().x())
+        if(direction_roll == 0): # Calculate the point to travel to in the first half of the jump
+            first_half_x_point = abs(end_range_x + int(distance_x/2))
+        else:
+            first_half_x_point = abs(end_range_x - int(distance_x/2))
+
+        time = jump_height*10
+        self.animation = QPropertyAnimation(self, b"pos")
+        self.animation.setDuration(time)
+        self.animation.setEasingCurve(QEasingCurve.Type.OutQuad)
+        self.animation.setTargetObject(self)
+        self.animation.setStartValue(QPoint(self.pos()))
+        self.animation.setEndValue(QPoint(first_half_x_point, self.pos().y() - jump_height - self.height()))
+        self.animation.finished.connect(lambda: self.end_jumpanimation(time, end_range_x))
+        
+        
+        if("jump" in self.frames):
+            frames = self.frames.get("jump",[])
+            total_frames = len(frames)
+            if(total_frames == 0):
+                return
+            self.current_frame_idx = 1
+            time_for_frame = int(time*2/total_frames)
+            self.jump_frame_timer.start(time_for_frame)
+            self.jump_frame_timer.timeout.connect(lambda: self.next_jump_frame(frames))
+        else:
+            if(direction_roll == 0): 
+                jump_sprite = self.sprites["jumpleft"][0]
+            else:   
+                jump_sprite = self.sprites["jumpright"][0]
+            self.setLabelImage(jump_sprite)
+            self.animation.start()
+            
+        
+    def next_jump_frame(self, frames):
+        
+        if(self.current_frame_idx < len(frames) and self.current_frame_idx>=0):
+            tuple = frames[self.current_frame_idx] # Access the tuple with image name and pixmap
+            self.label.setPixmap(tuple[1])
+            self.label.resize(tuple[1].size())
+            self.resize(self.label.size())
+            self.current_frame_idx += 1
+            if "start" in tuple[0]:
+                self.animation.start()
+        else:
+            self.jump_frame_timer.stop()
+
+    def end_jumpanimation(self, time: int, end_range_x: int):
+        self.animation = QPropertyAnimation(self, b"pos")
+        self.animation.setDuration(time)
+        self.animation.setEasingCurve(QEasingCurve.Type.InQuad)
+        self.animation.setTargetObject(self)
+        self.animation.setStartValue(QPoint(self.pos()))
+        self.animation.setEndValue(QPoint(end_range_x, get_taskbar_height()-self.height()))
+        self.animation.start()
+        self.animation.finished.connect(self.stop_current_animation)
+
+    def start_walkanimation(self ):
+        screen_width = get_size().width()
+        min_movement_distance = 100      
+
+        self.roll_direction = random.randrange(0, 2) #If 0 go left, if 1 go right
+        
+        if(self.roll_direction == 0):
+            start_range = 0
+            end_range = self.pos().x() - min_movement_distance
+        
+        else:
+            start_range = self.pos().x() + min_movement_distance
+            end_range = screen_width-self.width()
+
+        if(start_range<end_range  ):
+            if(self.roll_direction == 0):
+                self.start_anim("walkleft")
+            else:
+                self.start_anim("walkright")
+            possible_direction = random.randrange(start_range,end_range) 
+            
+            self.walktocoord = QPoint(possible_direction, self.pos().y())
+        
+        else: # If invalid range, dont start any animation and try again later.
+            return
+
+
+        time = int(abs(self.walktocoord.x()-self.pos().x()))
+        time = int(5*time) # Convert to int to avoid bugs
+        self.animation = QPropertyAnimation(self, b"pos")
+        self.animation.setDuration(time) # Time it takes the animation to be completed
+        self.animation.setTargetObject(self) # Widget as the target for the animation
+        self.animation.setStartValue(QPoint(self.pos())) # Current pos as start
+        self.animation.setEndValue(QPoint(self.walktocoord.x(), self.pos().y())) # Same y coord.
+        self.animation.finished.connect(self.stop_current_animation)
+        self.animation.finished.connect(self.stop_current_sound) 
+        self.animation.start()
+    def next_frame(self):
         frames = self.frames.get(self.current_anim_name, [])   # Get the frames from the current animation
         if self.current_frame_idx<len(frames) and self.current_frame_idx>=0 : # While the current frame is still valid
             
-           
+            current_frame = frames[self.current_frame_idx][1]
             if(self.current_anim_name != "walkleft" and self.current_anim_name != "walkright"):
                 #Compensating for size change between images
                 prevpos = self.pos()
                 prevsize = self.size()
 
-                current_frame = frames[self.current_frame_idx]
+                
                 newsize = current_frame.size()
 
                 deltawidth = newsize.width() - prevsize.width()
@@ -274,11 +374,11 @@ class Character(QWidget):
                     prevpos.y() - deltaheight // 2
                 )
                 self.move(new_pos)
-            
-            self.label.resize(frames[self.current_frame_idx].size()) # Resize the label and widget to the img size
-            self.resize(frames[self.current_frame_idx].size())
+
+            self.label.resize(current_frame.size()) # Resize the label and widget to the img size
+            self.resize(self.label.size())
              
-            self.label.setPixmap(frames[self.current_frame_idx]) # Set the image of the character to corresponding frame
+            self.label.setPixmap(current_frame) # Set the image of the character to corresponding frame
             #print(self.walktocoord.x())
             self.current_frame_idx += 1
             
@@ -317,22 +417,47 @@ class Character(QWidget):
     def preload_animations(self, animname):
         base_path = resource_path(f'assets/{self.name}/animations/{animname}')
         base = Path(base_path)
-        files = sorted(base.glob("*.png"), key=lambda f: int(f.stem)) # Sort files by number
+
+        files = sorted(base.glob("*.png"), key=lambda f: int(f.stem.split('-')[0])) # Sort files by number
+  
         target: QSize = self.char_size # Set target size for images 
         width = target.width()
         height = target.height()
+
         match animname:
             case "dance":
                 width = int(width*1.5)
                 height = int(height*1.5)
         target = QSize(width,height)
             
-        loaded: list[QPixmap] = []
+        loaded: list[tuple[str, QPixmap]] = []
+        
+        print("animname:", animname)
         for f in files:
+            
+            filename = f.name
             reader = QPixmap(str(f)).scaled(target, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)  # QPixmap ready
-            loaded.append(reader) # Append each image to  frames
+            loaded.append((filename, reader)) # Append each image and name to  frames
         self.frames[animname] = loaded # Set the image list to the corresponding animation
         self.anim_idx[animname] = 0
+
+        if(animname[:4] == "walk"):
+            reverse_loaded: list[tuple[str, QPixmap]] = []
+            reversed_filename: str;
+            
+            if(animname == "walkleft"):
+                reversed_filename = "walkright"
+            else:
+                reversed_filename = "walkleft"
+            print("reversed: ", reversed_filename)
+            for name, pixmap in loaded:
+                pixmap = pixmap.toImage()
+                pixmap = QPixmap.fromImage(pixmap.mirrored(True, False))
+                reverse_loaded.append((name, pixmap))
+            print("reversed")
+            self.frames[reversed_filename] = reverse_loaded
+            self.anim_idx[reversed_filename] = 0
+        
     def preload_allanimations(self):
         for animation in totalanimations[self.name]:
             self.preload_animations(animation)
@@ -392,7 +517,7 @@ class Character(QWidget):
                     sound_effect.playingChanged.connect(lambda: sound_effect.deleteLater()) # Destroy itself to avoid being picked up by garbage col.
                         
     def mouseMoveEvent(self, e):
-        if(self.onanimation == False):
+        if(self.onanimation == False): 
             if(self.drag and e.buttons() & Qt.MouseButton.LeftButton):
                 self.setCursor(Qt.CursorShape.ClosedHandCursor)
                 new_top_left = e.globalPosition().toPoint()-self.offset
@@ -404,15 +529,13 @@ class Character(QWidget):
                     dirx = random.randint(0,10)
                     diry = random.randint(0,10)
                     self.move(new_top_left.x()+dirx, new_top_left.y()+diry)
+                    pass
                 else:
                     #If not shaken, set normal image.
                     if(self.chosen_grabbed_image == False):
                         self.grabbed_image = random.choice(self.sprites['grabbed'])
                         self.setLabelImage(self.grabbed_image)
                         self.chosen_grabbed_image = True
-
-                
-                
         else:
             self.unsetCursor()      
 
@@ -448,7 +571,9 @@ class Character(QWidget):
     
     def setLabelImage(self, dir):
         pix = QPixmap(dir)
+
         scaled = pix.scaled(self.char_size, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation )
+        
         self.label.setPixmap(scaled)  
         self.label.resize(scaled.size()) 
         self.resize(scaled.size())
@@ -472,8 +597,10 @@ class Character(QWidget):
         self.mutesounds = flag
     def setOnAnimation(self):
         self.onanimation = not self.onanimation
-    
+    def getOnAnimation(self):
+        return self.onanimation
     def fall_animation(self):
+        
         self.onanimation = True # Warns click events that this widget is on an animation and it cant be clicked.
 
         #Get current position
@@ -488,6 +615,7 @@ class Character(QWidget):
 
         #Set the falling sprite
         falling_sprite = random.choice(self.sprites["falling"])
+        
         self.setLabelImage(falling_sprite)
 
         #Deciding sprite for animation's end
@@ -562,6 +690,18 @@ def create_character(name: str):
 #Setting up variables
 
 app = QApplication([]) 
+
+#Config
+config_file = resource_path("config.json")
+config_data = {}
+try:
+    with open(config_file, 'r', encoding='utf+8') as f:
+        config_data = json.load(f)
+    print("Loaded config")
+except json.JSONDecodeError:
+    print("ERROR: Badly written JSON or Syntaxis error")
+except FileNotFoundError:
+    print("ERROR: Config file NOT found")
 #Setting the window and flags
 yahawindow = QWidget()
 yahawindow.setWindowFlag(Qt.WindowType.FramelessWindowHint) #  No title bar
@@ -630,11 +770,13 @@ yahawindow.show()
 #Defining each animation and each character
 totalanimations : dict[str, list[str]] = {}
 allcharacters = ["usagi", "hachiware", "chiikawa"]
+available_coop_animations : dict[str, list[str]] = {}
 
 #Declaring variables for future use and keeping them alive from garbage collection
 sound = QSoundEffect()
 characters = [] # List to hold character instances
 characters_names = [] # List to hold current alive characters
+CHAR_CODES : dict[str, str] = {"usagi": "u", "hachiware": "h", "chiikawa": "c"}
 
 #MENU FUNCTIONS
 def mute_character(name: str):
@@ -684,9 +826,24 @@ def setup_all_menus():
                     print(folder_name)
                     character_animations.append(folder_name)
             totalanimations[character] = character_animations
+
+            coop_dir = Path(resource_path(f'assets/coanimations'))
+            
+            if(Path.exists(coop_dir)):
+                coop_animations = []
+                for folder_name in coop_dir.iterdir():
+                    folder_name = folder_name.name
                     
+                    if(character[0] == folder_name[0] or character[0] == folder_name[1]): 
+                        #The first and second letter of each coanimation file starts with the character's initial
+                        #For example, "hc.png" is a coanimation sprite of H-achiware and C-hiikawa.
+                        coop_animations.append(folder_name)
+            else:
+                available_coop_animations[character] = []
+            available_coop_animations[character] = coop_animations
+            #print(available_coop_animations[character])
         
-    print(totalanimations["usagi"])
+    #print(totalanimations["hachiware"])
      
            
  

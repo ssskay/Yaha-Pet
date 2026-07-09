@@ -698,7 +698,8 @@ def create_character(name: str):
         kick_menu.setDisabled(False) # Enable kicking the character
         
         #Instance the character
-        character = Character(name, get_size_for_characters()) 
+        character = Character(name, get_size_for_characters())
+        character.mute(muteall_flag) # Respect Mute All for characters spawned after muting
 
         ###Preload all animations
         yaha_tray.showMessage(f'Loading {name}', 'This may take a while the first time', QSystemTrayIcon.MessageIcon.Information, 500)
@@ -827,7 +828,10 @@ try:
 except AttributeError:
     print("setAsDockMenu not available on this platform")
 
-yahawindow.show()
+#yahawindow.show() — disabled on macOS: this invisible fullscreen always-on-top
+#window intercepted clicks meant for other applications (on Windows, layered
+#windows pass clicks through transparent pixels automatically; macOS is less
+#forgiving). Nothing is parented to it, so it doesn't need to be shown at all.
 
 #Defining each animation and each character
 totalanimations : dict[str, list[str]] = {}
@@ -848,6 +852,8 @@ def mute_character(name: str):
         for character in characters:
             if(character != None):
                 character.mute(muteall_flag)
+        #Reflect the state on the menu item so it works as a toggle
+        muteall_button.setText("Unmute All" if muteall_flag else "Mute All")
     
 def gather_characters():
     if(len(characters) == 0):

@@ -11,7 +11,19 @@ A simple desktop pet application featuring characters from the "Chiikawa" univer
 * System Tray Control: Manage your spawned characters through a system tray icon menu.
 * Customizable: Don't like a certain animation? Sound is too loud? Change it all on the tray control.
 
-## 🚀 How to Run
+## 🍎 macOS Support
+
+Yaha-Pet now runs natively on macOS! Download `Yaha-Pet-macOS.zip` from the Releases page, unzip, and open `Yaha-Pet.app` (right-click → Open the first time if Gatekeeper complains). Usagi spawns automatically; right-click the Dock icon for the full menu (Spawn Character, Gather everyone!, animations, and more).
+
+To build from source on macOS:
+
+1. `python3 -m pip install --user PyQt6 pyinstaller`
+2. `pyinstaller --noconfirm --windowed --name Yaha-Pet --icon yaha.icns --add-data assets:assets "Yaha-Pet!.py"`
+3. The app appears in `dist/Yaha-Pet.app`
+
+macOS changes also include: a fix for a crash when grabbing characters (double-free of the grab sound player), a fix for the random-behavior roll so characters walk and dance instead of only jumping, a "Gather everyone!" menu action that recalls wandering pets to screen center, pets staying visible while other apps are focused, and a Dock menu.
+
+## 🚀 How to Run (Windows)
 
 This application is intended for Windows users.
 

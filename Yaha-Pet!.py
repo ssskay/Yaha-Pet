@@ -8,6 +8,13 @@ from PyQt6.QtMultimedia import QSoundEffect
 from pathlib import Path
 import random 
 
+def _excepthook(exc_type, exc_value, exc_tb):
+    """Log unhandled exceptions instead of letting PyQt6 abort the app."""
+    import traceback
+    traceback.print_exception(exc_type, exc_value, exc_tb)
+
+sys.excepthook = _excepthook
+
 def resource_path(relative_path):
     """ Get absolute path to resource, works for dev and for PyInstaller """
     try:
@@ -81,6 +88,14 @@ class Character(QWidget):
         self.soundplayer.setVolume(0.5)
         self.soundplayer.setLoopCount(1)
         self.mutesounds : bool = False
+
+        #Persistent player for "grabbed" sounds. A new QSoundEffect was
+        #previously created per grab and set to delete itself when playback
+        #stopped, but on Qt 6.10 its destructor re-emits playingChanged and
+        #the double deleteLater() crashed the app (SIGABRT).
+        self.grabplayer = QSoundEffect()
+        self.grabplayer.setVolume(1)
+        self.grabplayer.setLoopCount(1)
 
         #Sound Effects
         self.grabbed_soundeffects = [] # List of all sound effects available when the character gets grabbed with mouse
@@ -177,10 +192,13 @@ class Character(QWidget):
         self.label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True) # Doesnt consume click entries
 
         #Character window flags: Always on top, no text and no taskbar icon, and receive click inputs
-        self.setWindowFlag(Qt.WindowType.FramelessWindowHint) 
+        self.setWindowFlag(Qt.WindowType.FramelessWindowHint)
         self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint)
         self.setWindowFlag(Qt.WindowType.Tool)
-        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False) 
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
+        #macOS: keep the pet visible even when another app is focused.
+        #Without this, Tool windows hide when the app deactivates ("losing" the pet).
+        self.setAttribute(Qt.WidgetAttribute.WA_MacAlwaysShowToolWindow, True)
 
         #Widget Attributes
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True) # no backg
@@ -226,27 +244,19 @@ class Character(QWidget):
         if(self.pos().x() < 0 or self.pos().x()>screen_width or self.pos().y()<0 or self.pos().y()>screen_height):
             self.move(self.clamp_to_screen(0,0))
         if(not self.onanimation and not self.drag):
+            # Fixed behavior roll: original code always jumped (roll<=100 was always true).
+            # Now: 40% jump, 30% walk, 30% random animation (dance etc.)
             roll = random.randrange(0,100)
-            if(roll<=100):
+            if(roll < 40):
                 self.start_jumpanimation(screen_width)
+            elif(roll < 70):
+                self.start_walkanimation()
             else:
-                if(roll> 10 and roll<=50): #If roll<=X, do walking or jump animation
-                    self.start_walkanimation()
+                if(len(self.modified_animationlist[self.name])>0):
+                    chosen_animation = random.choice(self.modified_animationlist[self.name])
+                    self.start_anim(chosen_animation)
                 else:
-                    if(roll>=95):
-                        pass
-                    #     selected_character = None
-                    #     if(available_coop_animations[self.name]):
-                    #         for character in available_coop_animations[self.name]:
-                    #             if(character.getOnAnimation() == False):
-                    #                 selected_character = character
-                    #                 break
-                    #     else:
-                    #         self.try_animation()
-                    else:
-                        if(len(self.modified_animationlist[self.name])>0):
-                            chosen_animation = random.choice(self.modified_animationlist[self.name])
-                            self.start_anim(chosen_animation)
+                    self.start_walkanimation()
     def start_jumpanimation(self, screen_width):
         self.onanimation = True
         direction_roll = random.randint(0,1)
@@ -456,10 +466,9 @@ class Character(QWidget):
         width = target.width()
         height = target.height()
 
-        match animname:
-            case "dance":
-                width = int(width*1.5)
-                height = int(height*1.5)
+        if animname == "dance":  # was a `match` statement; changed for Python 3.9 compatibility on macOS
+            width = int(width*1.5)
+            height = int(height*1.5)
         target = QSize(width,height)
             
         loaded: list[tuple[str, QPixmap]] = []
@@ -543,15 +552,13 @@ class Character(QWidget):
 
                 self.held_timer.timeout.connect(lambda: self.setLabelImage(self.shaken_image))
 
-                if(self.grabbed_soundeffects):
-                    sound_effect = QSoundEffect()
-                    sound_effect.setVolume(1)
+                if(self.grabbed_soundeffects and not self.mutesounds):
                     sound_chosen = random.choice(self.grabbed_soundeffects) # Choose a random "grabbed" sfx
                     print(sound_chosen)
                     sound_source = resource_path(f'assets/{self.name}/sounds/{sound_chosen}.wav')
-                    sound_effect.setSource(QUrl.fromLocalFile(sound_source))
-                    sound_effect.play()
-                    sound_effect.playingChanged.connect(lambda: sound_effect.deleteLater()) # Destroy itself to avoid being picked up by garbage col.
+                    self.grabplayer.stop()
+                    self.grabplayer.setSource(QUrl.fromLocalFile(sound_source))
+                    self.grabplayer.play()
                         
     def mouseMoveEvent(self, e):
         if(self.onanimation == False): 
@@ -751,6 +758,7 @@ resize_to_current_screen()
 
 #Attributes
 yahawindow.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True) # Transparency: True
+yahawindow.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True) # Never intercept clicks meant for other apps
 
 #Tray and icon
 icon_path = resource_path('assets/usagi/icons/usagi.ico')
@@ -777,6 +785,11 @@ tray_menu.addMenu(play_animation_menu)#Adding the play animation menu to the mai
 hi_action = tray_menu.addAction("Say hi!")
 hi_action.triggered.connect(say_hi_message)
 
+#Gather everyone: teleports all characters back to the center of the screen.
+#Useful when a pet has wandered somewhere hard to find.
+gather_action = tray_menu.addAction("Gather everyone!")
+gather_action.triggered.connect(lambda: gather_characters())
+
 #Kick out a character
 kick_menu = QMenu("Kick")
 kick_menu.triggered.connect(lambda action: kick_character(action))
@@ -802,6 +815,15 @@ exit_action.triggered.connect(close_app)
 
 #Set the menu to the tray
 yaha_tray.setContextMenu(tray_menu)
+
+#macOS: also attach the menu to the Dock icon (right-click / click-and-hold),
+#since crowded menu bars can hide the tray icon.
+try:
+    tray_menu.setAsDockMenu()
+    print("Dock menu attached")
+except AttributeError:
+    print("setAsDockMenu not available on this platform")
+
 yahawindow.show()
 
 #Defining each animation and each character
@@ -824,6 +846,25 @@ def mute_character(name: str):
             if(character != None):
                 character.mute(muteall_flag)
     
+def gather_characters():
+    if(len(characters) == 0):
+        yaha_tray.showMessage('Wait!', 'You have not spawned anyone yet!', QSystemTrayIcon.MessageIcon.Information, 500)
+        return
+    center_x = get_size().width()//2
+    offset = 0
+    for character in characters:
+        if(character != None and not character.drag):
+            print(f"Gathering {character.getName()}")
+            try:
+                if(character.getOnAnimation()):
+                    character.jump_frame_timer.stop()
+                    character.stop_current_animation()
+            except AttributeError:
+                pass # No animation has run yet, nothing to stop
+            character.move(center_x + offset - 120, 60)
+            character.fall_animation()
+            offset += 140
+
 def kick_character(action: QAction):
     charactername = action.text()
     characters_names.remove(charactername)
@@ -887,8 +928,9 @@ def setup_all_menus():
 #Start event loop
 setup_all_menus()
 
-
-
+#Auto-spawn Usagi on startup so opening the app visibly does something.
+#(On macOS the app lives in the menu bar only, which is easy to miss.)
+QTimer.singleShot(600, lambda: create_character("usagi"))
 
 app.exec()
 

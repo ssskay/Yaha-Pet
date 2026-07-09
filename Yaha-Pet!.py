@@ -195,6 +195,9 @@ class Character(QWidget):
         self.setWindowFlag(Qt.WindowType.FramelessWindowHint)
         self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint)
         self.setWindowFlag(Qt.WindowType.Tool)
+        #Never steal keyboard focus: clicking/dragging a pet should not push
+        #the app you were working in behind other windows.
+        self.setWindowFlag(Qt.WindowType.WindowDoesNotAcceptFocus)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
         #macOS: keep the pet visible even when another app is focused.
         #Without this, Tool windows hide when the app deactivates ("losing" the pet).
@@ -324,9 +327,7 @@ class Character(QWidget):
         
         if(self.current_frame_idx < len(frames) and self.current_frame_idx>=0):
             tuple = frames[self.current_frame_idx] # Access the tuple with image name and pixmap
-            self.label.setPixmap(tuple[1])
-            self.label.resize(tuple[1].size())
-            self.resize(self.label.size())
+            self._set_masked_pixmap(tuple[1])
             self.current_frame_idx += 1
             if "start" in tuple[0]:
                 self.animation.start()
@@ -417,10 +418,7 @@ class Character(QWidget):
                 )
                 self.move(new_pos)
 
-            self.label.resize(current_frame.size()) # Resize the label and widget to the img size
-            self.resize(self.label.size())
-             
-            self.label.setPixmap(current_frame) # Set the image of the character to corresponding frame
+            self._set_masked_pixmap(current_frame) # Set the frame, resize, and mask to visible pixels
             #print(self.walktocoord.x())
             self.current_frame_idx += 1
             
@@ -515,13 +513,11 @@ class Character(QWidget):
         pix = QPixmap(filename)
         scaled = pix.scaled(self.char_size, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation )
 
-        #Setting the image to the label
-        self.label.setPixmap(scaled)
-        self.label.resize(scaled.size()) # Make the label same size as image
-        self.resize(scaled.size()) # Make the widget same size as image
-        
+        #Setting the image to the label (masked to visible pixels)
+        self._set_masked_pixmap(scaled)
+
         #Showing the label
-        self.label.show() 
+        self.label.show()
 
         #self.setStyleSheet("border: 2px solid red;")  # DEBUG
 
@@ -613,21 +609,28 @@ class Character(QWidget):
     def getLabel(self):
         return self.label
     
+    def _set_masked_pixmap(self, pix: QPixmap):
+        #Set the sprite AND shape the window to its visible pixels, so the
+        #transparent margins around the character never block clicks meant
+        #for the windows underneath.
+        self.label.setPixmap(pix)
+        self.label.resize(pix.size())
+        self.resize(pix.size())
+        mask = pix.mask()
+        if(not mask.isNull()):
+            self.setMask(mask)
+
     def setLabelImage(self, dir):
         pix = QPixmap(dir)
 
         scaled = pix.scaled(self.char_size, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation )
-        
-        self.label.setPixmap(scaled)  
-        self.label.resize(scaled.size()) 
-        self.resize(scaled.size())
+
+        self._set_masked_pixmap(scaled)
         self.label.repaint()
 
     def setDefaultLabel(self):
         spawn_sprite = random.choice(self.sprites["spawn"])
-        self.label.setPixmap(spawn_sprite)
-        self.resize(spawn_sprite.size())
-        self.label.resize(spawn_sprite.size())
+        self._set_masked_pixmap(spawn_sprite)
 
 
 

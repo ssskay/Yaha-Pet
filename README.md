@@ -1,4 +1,10 @@
-# Yaha-Pet!
+# Yaha-Pet for macOS & Windows 🐰 — Chiikawa Desktop Pets
+
+![Downloads](https://img.shields.io/github/downloads/ssskay/Yaha-Pet/total?label=downloads&color=ff69b4) ![Release](https://img.shields.io/github/v/release/ssskay/Yaha-Pet?label=latest&color=8fd3f4) ![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-black)
+
+**Usagi, Hachiware, and Chiikawa live on your desktop.** If you searched for a *"chiikawa desktop pet for Mac"* — this fork adds a native macOS app (Apple Silicon M1/M2/M3/M4 & Intel, no emulator needed) to [gitChara-dot's original Windows Yaha-Pet](https://github.com/gitChara-dot/Yaha-Pet). Mac download is on the [Releases](../../releases) page; Windows users, grab the [original release](https://github.com/gitChara-dot/Yaha-Pet/releases).
+
+ちいかわ・うさぎ・ハチワレのデスクトップペット、Mac対応版です 🐰 (macOS ネイティブアプリ)
 
 A simple desktop pet application featuring characters from the "Chiikawa" universe, created with Python and PyQt6. The characters will roam your desktop, play animations, and react to your interactions.
 

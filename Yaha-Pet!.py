@@ -212,7 +212,9 @@ class Character(QWidget):
 
     def start_random_timer(self):
         random_time = random.randrange(3000,10000)
-        self.randomtimer.start(random_time)
+        #Per-character pacing: >1.0 makes a character act (and thus vocalize) less often
+        scale = config_data.get(self.name, {}).get("animation_interval_scale", 1.0)
+        self.randomtimer.start(int(random_time * scale))
         self.randomtimer.timeout.connect(self.try_animation)
             
     def start_anim(self, animname: str):
@@ -231,6 +233,11 @@ class Character(QWidget):
                 if(self.mutesounds == False):
                     self.play_animsound(animname)
     def play_animsound(self, animname:str ):
+        #Per-character chattiness: sound_chance < 1.0 randomly skips some sounds
+        chance = config_data.get(self.name, {}).get("sound_chance", 1.0)
+        if(random.random() > chance):
+            print(f"({self.name} kept quiet this time, sound_chance={chance})")
+            return
         self.soundplayer.setMuted(False)
         self.soundplayer.setLoopCount(1)
         soundpath = resource_path(f'assets/{self.name}/sounds/{animname}.wav')
@@ -739,17 +746,29 @@ def create_character(name: str):
 
 app = QApplication([]) 
 
-#Config
-config_file = resource_path("config.json")
+#Config — a per-user config (in the OS app-support folder) takes priority,
+#then a config.json next to the app. Supports per-character overrides:
+#  {"usagi": {"sound_chance": 0.75, "animation_interval_scale": 1.33,
+#             "animations": {"dance": {"fps": 40}}}}
+#sound_chance: probability (0-1) an animation sound actually plays.
+#animation_interval_scale: multiplier on time between random animations.
 config_data = {}
-try:
-    with open(config_file, 'r', encoding='utf+8') as f:
-        config_data = json.load(f)
-    print("Loaded config")
-except json.JSONDecodeError:
-    print("ERROR: Badly written JSON or Syntaxis error")
-except FileNotFoundError:
-    print("ERROR: Config file NOT found")
+_config_candidates = [
+    os.path.join(Path.home(), "Library", "Application Support", "Yaha-Pet", "config.json"),
+    resource_path("config.json"),
+]
+for config_file in _config_candidates:
+    try:
+        with open(config_file, 'r', encoding='utf-8') as f:
+            config_data = json.load(f)
+        print(f"Loaded config from {config_file}")
+        break
+    except json.JSONDecodeError:
+        print(f"ERROR: Badly written JSON in {config_file}")
+    except FileNotFoundError:
+        continue
+else:
+    print("No config file found, using defaults")
 #Setting the window and flags
 yahawindow = QWidget()
 yahawindow.setWindowFlag(Qt.WindowType.FramelessWindowHint) #  No title bar

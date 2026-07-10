@@ -1,6 +1,7 @@
 import os
 import sys
 import json
+import time
 from PyQt6.QtWidgets import QApplication, QWidget, QSystemTrayIcon, QMenu, QLabel
 from PyQt6.QtCore import Qt, QSize, QPoint, QUrl, QPropertyAnimation, QTimer, QEasingCurve
 from PyQt6.QtGui import QIcon, QGuiApplication, QPixmap, QAction
@@ -120,6 +121,13 @@ class Character(QWidget):
 
         self.chosen_grabbed_image : bool = False
         self.grabbed_image : QPixmap = None;
+
+        #Throw physics variables — flick a character on release and it goes flying
+        self.drag_history = [] # recent (timestamp, QPoint) samples while dragging
+        self.physics_timer = QTimer()
+        self.physics_timer.timeout.connect(self._physics_step)
+        self.velocity = [0.0, 0.0] # px/s
+        self.pos_f = [0.0, 0.0]    # float position accumulator
 
         #Shake animation variables
         self.held_timer = QTimer() # Timer to start shake animation
@@ -542,6 +550,7 @@ class Character(QWidget):
         if(not self.onanimation):
             if(e.button() == Qt.MouseButton.LeftButton):
                 self.drag = True
+                self.drag_history = [] # Start fresh velocity samples for throw physics
                 self.offset = e.globalPosition().toPoint() - self.frameGeometry().topLeft() # Put the cursor at the center of the widget
                 
                 #Set timer to activate shake animation
@@ -570,6 +579,11 @@ class Character(QWidget):
                 new_top_left = e.globalPosition().toPoint()-self.offset
                 new_top_left = self.clamp_to_screen(new_top_left) # Ensures the character falls onto the taskbar
                 self.move(new_top_left)
+
+                #Record movement samples so we know the velocity at release
+                self.drag_history.append((time.monotonic(), self.pos()))
+                if(len(self.drag_history) > 8):
+                    self.drag_history.pop(0)
                 
                 #ERRATIC MOVEMENT
                 if(self.start_shake):
@@ -596,10 +610,88 @@ class Character(QWidget):
             self.start_shake = False
             self.chosen_grabbed_image = False
 
-            self.fall_animation() 
+            #Thrown or dropped? Fast flick = physics throw, gentle release = classic fall
+            vx, vy = self._release_velocity()
+            if((vx*vx + vy*vy) ** 0.5 > 900.0):
+                self.start_throw(vx, vy)
+            else:
+                self.fall_animation()
 
             #Stop the sound effects to avoid audio glitches
             
+    def _release_velocity(self):
+        #Velocity (px/s) from the last ~120ms of drag movement
+        now = time.monotonic()
+        history = [(t, p) for (t, p) in self.drag_history if now - t < 0.12]
+        self.drag_history = []
+        if(len(history) < 2):
+            return (0.0, 0.0)
+        t0, p0 = history[0]
+        t1, p1 = history[-1]
+        dt = t1 - t0
+        if(dt <= 0):
+            return (0.0, 0.0)
+        return ((p1.x() - p0.x()) / dt, (p1.y() - p0.y()) / dt)
+
+    def start_throw(self, vx: float, vy: float):
+        print(f"{self.name} thrown at ({vx:.0f}, {vy:.0f}) px/s")
+        self.onanimation = True
+        CAP = 4500.0
+        self.velocity = [max(-CAP, min(CAP, vx)), max(-CAP, min(CAP, vy))]
+        self.pos_f = [float(self.pos().x()), float(self.pos().y())]
+        self.setLabelImage(random.choice(self.sprites["falling"]))
+        self.physics_timer.start(16)
+
+    def _physics_step(self):
+        DT = 0.016
+        GRAVITY = 3200.0      # px/s^2
+        BOUNCE_WALL = 0.6     # energy kept on wall bounce
+        BOUNCE_FLOOR = 0.45   # energy kept on floor bounce
+        FRICTION = 0.65       # horizontal damping per floor bounce
+        MIN_BOUNCE = 700.0    # slower than this and we land instead of bouncing
+
+        self.velocity[1] += GRAVITY * DT
+        self.pos_f[0] += self.velocity[0] * DT
+        self.pos_f[1] += self.velocity[1] * DT
+
+        scr = QGuiApplication.screenAt(self.pos()) or self.windowHandle().screen()
+        rect = scr.availableGeometry()
+        floor_y = rect.bottom() - self.height() + 1
+        right_x = rect.right() - self.width() + 5
+
+        if(self.pos_f[0] < rect.left()):
+            self.pos_f[0] = rect.left()
+            self.velocity[0] = -self.velocity[0] * BOUNCE_WALL
+        elif(self.pos_f[0] > right_x):
+            self.pos_f[0] = right_x
+            self.velocity[0] = -self.velocity[0] * BOUNCE_WALL
+        if(self.pos_f[1] < rect.top()):
+            self.pos_f[1] = rect.top()
+            self.velocity[1] = -self.velocity[1] * 0.4
+
+        if(self.pos_f[1] >= floor_y):
+            impact = self.velocity[1]
+            self.pos_f[1] = floor_y
+            if(impact > MIN_BOUNCE):
+                self.velocity[1] = -impact * BOUNCE_FLOOR
+                self.velocity[0] *= FRICTION
+            else:
+                self._end_throw(impact)
+                return
+
+        self.move(int(self.pos_f[0]), int(self.pos_f[1]))
+
+    def _end_throw(self, impact_speed: float):
+        self.physics_timer.stop()
+        self.move(int(self.pos_f[0]), int(self.pos_f[1]))
+        self.onanimation = False
+        #Hard landings leave them briefly crashed on the ground
+        if(impact_speed > 400):
+            self.setLabelImage(resource_path(f'assets/{self.name}/sprites/fallingend.png'))
+            QTimer.singleShot(900, self.setDefaultLabel)
+        else:
+            self.setDefaultLabel()
+
     def clamp_to_screen(self, pt: QPoint) -> QPoint:
         # Gets actual screen or the one under the cursor
         scr = QGuiApplication.screenAt(pt) or self.windowHandle().screen()

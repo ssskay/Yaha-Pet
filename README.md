@@ -6,6 +6,7 @@ A simple desktop pet application featuring characters from the "Chiikawa" univer
 
 * Autonomous Behavior: Characters walk around the screen on their own.
 * Interactive: Drag and drop the characters anywhere on your screen.
+* Throw Physics: flick a character and it goes flying — arcing, bouncing off screen edges, and crash-landing if you toss it hard enough. Gentle drops still float politely down.
 * Lively Animations: Features several sprite animations for different actions like walking and dancing.
 * Sound Effects: Characters have unique sounds for animations and interactions.
 * System Tray Control: Manage your spawned characters through a system tray icon menu.

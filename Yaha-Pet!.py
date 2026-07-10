@@ -636,7 +636,10 @@ class Character(QWidget):
     def start_throw(self, vx: float, vy: float):
         print(f"{self.name} thrown at ({vx:.0f}, {vy:.0f}) px/s")
         self.onanimation = True
-        CAP = 4500.0
+        CAP = 3000.0
+        THROW_SCALE = 0.8 # soften throws slightly below the raw flick speed
+        vx *= THROW_SCALE
+        vy *= THROW_SCALE
         self.velocity = [max(-CAP, min(CAP, vx)), max(-CAP, min(CAP, vy))]
         self.pos_f = [float(self.pos().x()), float(self.pos().y())]
         self.setLabelImage(random.choice(self.sprites["falling"]))
@@ -645,8 +648,8 @@ class Character(QWidget):
     def _physics_step(self):
         DT = 0.016
         GRAVITY = 3200.0      # px/s^2
-        BOUNCE_WALL = 0.6     # energy kept on wall bounce
-        BOUNCE_FLOOR = 0.45   # energy kept on floor bounce
+        BOUNCE_WALL = 0.5     # energy kept on wall bounce
+        BOUNCE_FLOOR = 0.38   # energy kept on floor bounce
         FRICTION = 0.65       # horizontal damping per floor bounce
         MIN_BOUNCE = 700.0    # slower than this and we land instead of bouncing
 

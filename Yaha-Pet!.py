@@ -790,6 +790,262 @@ class Character(QWidget):
         else:
             self.timer.timeout.connect(lambda: self.setDefaultLabel())
         
+class CoAnimation(QWidget):
+    """The 'touching' moment: when chiikawa and hachiware meet, both pets
+    hide and this widget plays their walk-together frames, then a final
+    heart/handholding pose, then they separate again.
+
+    Assets (assets/coanimations/): hc_walktogether/{n}.png frame folder,
+    hc_heart.png / hc_handholding.png static poses, sounds/together.wav.
+    """
+    WALK_FPS = 9
+    WALK_MS = 3400        # how long they stroll together
+    POSE_MS = 1800        # how long the final pose is held
+
+    def __init__(self, char_a: 'Character', char_b: 'Character'):
+        super().__init__(parent=None)
+        self.char_a = char_a
+        self.char_b = char_b
+        self.finished = False
+
+        self.setWindowFlag(Qt.WindowType.FramelessWindowHint)
+        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint)
+        self.setWindowFlag(Qt.WindowType.Tool)
+        self.setWindowFlag(Qt.WindowType.WindowDoesNotAcceptFocus)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_MacAlwaysShowToolWindow, True)
+
+        self.label = QLabel(parent=self)
+        self.label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        # co-art is two characters wide
+        char_size = char_a.char_size
+        self.co_size = QSize(int(char_size.width() * 1.9), int(char_size.height() * 1.3))
+
+        #Walk-together frames
+        self.walk_frames: list[QPixmap] = []
+        frames_dir = Path(resource_path('assets/coanimations/hc_walktogether'))
+        if frames_dir.exists():
+            for f in sorted(frames_dir.glob('*.png'), key=lambda p: int(p.stem)):
+                pix = QPixmap(str(f)).scaled(self.co_size, Qt.AspectRatioMode.KeepAspectRatio,
+                                             Qt.TransformationMode.SmoothTransformation)
+                self.walk_frames.append(pix)
+
+        #Final pose (random pick between the two stickers)
+        self.pose_pixmap = None
+        poses = [p for p in ['hc_heart.png', 'hc_handholding.png']
+                 if Path(resource_path(f'assets/coanimations/{p}')).exists()]
+        if poses:
+            chosen = random.choice(poses)
+            self.pose_pixmap = QPixmap(resource_path(f'assets/coanimations/{chosen}')).scaled(
+                self.co_size, Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation)
+            print(f"coanimation pose: {chosen}")
+
+        #Sound
+        self.co_sound = QSoundEffect()
+        self.co_sound.setVolume(0.5)
+        self.co_sound.setLoopCount(1)
+        sound_path = resource_path('assets/coanimations/sounds/together.wav')
+        if Path(sound_path).exists():
+            self.co_sound.setSource(QUrl.fromLocalFile(sound_path))
+
+        self.frame_idx = 0
+        self.frame_timer = QTimer(self)
+        self.frame_timer.timeout.connect(self._next_frame)
+        self.walk_anim = None
+
+    def _set_pix(self, pix: QPixmap):
+        self.label.setPixmap(pix)
+        self.label.resize(pix.size())
+        self.resize(pix.size())
+        mask = pix.mask()
+        if(not mask.isNull()):
+            self.setMask(mask)
+
+    def start(self):
+        #Start at the midpoint of the two pets, snapped to the floor
+        mid_x = (self.char_a.pos().x() + self.char_b.pos().x()) // 2
+        scr = QGuiApplication.screenAt(self.char_a.pos()) or QGuiApplication.primaryScreen()
+        rect = scr.availableGeometry()
+
+        first = self.walk_frames[0] if self.walk_frames else self.pose_pixmap
+        if first is None:
+            print("coanimation assets missing — aborting")
+            self._finish()
+            return
+        self._set_pix(first)
+
+        x = max(rect.left(), min(mid_x, rect.right() - self.width()))
+        y = rect.bottom() - self.height() + 1
+        self.move(x, y)
+        self.show()
+        self.label.show()
+
+        if(not muteall_flag and not self.char_a.mutesounds):
+            self.co_sound.play()
+
+        if self.walk_frames:
+            self.frame_timer.start(int(1000 / self.WALK_FPS))
+            #Stroll a little way together (stay on screen)
+            distance = random.randint(120, 240) * random.choice([-1, 1])
+            end_x = max(rect.left(), min(x + distance, rect.right() - self.width()))
+            self.walk_anim = QPropertyAnimation(self, b"pos")
+            self.walk_anim.setDuration(self.WALK_MS)
+            self.walk_anim.setEasingCurve(QEasingCurve.Type.InOutSine)
+            self.walk_anim.setStartValue(QPoint(x, y))
+            self.walk_anim.setEndValue(QPoint(end_x, y))
+            self.walk_anim.finished.connect(self._show_pose)
+            self.walk_anim.start()
+        else:
+            self._show_pose()
+
+    def _next_frame(self):
+        if(not self.walk_frames):
+            return
+        self.frame_idx = (self.frame_idx + 1) % len(self.walk_frames)
+        self._set_pix(self.walk_frames[self.frame_idx])
+
+    def _show_pose(self):
+        self.frame_timer.stop()
+        if(self.pose_pixmap is not None):
+            #Keep the widget's floor position while the pose (bigger art) shows
+            old_bottom = self.pos().y() + self.height()
+            old_center = self.pos().x() + self.width() // 2
+            self._set_pix(self.pose_pixmap)
+            self.move(old_center - self.width() // 2, old_bottom - self.height())
+        QTimer.singleShot(self.POSE_MS, self._finish)
+
+    def _finish(self):
+        if(self.finished):
+            return
+        self.finished = True
+        self.frame_timer.stop()
+        if(self.walk_anim is not None):
+            self.walk_anim.stop()
+        end_coanimation(self)
+
+    def abort(self):
+        self._finish()
+
+
+current_coanim: 'CoAnimation | None' = None
+last_coanim_end: float = 0.0
+
+
+def _coanim_config():
+    cfg = config_data.get("coanimations", {})
+    return (
+        cfg.get("enabled", True),
+        cfg.get("cooldown_min_s", 60),
+        cfg.get("cooldown_max_s", 150),
+    )
+
+
+_coanim_next_ok: float = 0.0
+
+
+def check_touch():
+    """Runs on a timer: when chiikawa and hachiware overlap, play the
+    together-moment. Cooldown keeps it special."""
+    global current_coanim, _coanim_next_ok
+    enabled, cd_min, cd_max = _coanim_config()
+    if(not enabled or current_coanim is not None):
+        return
+    if(time.monotonic() < _coanim_next_ok):
+        return
+    chii = hachi = None
+    for c in characters:
+        if(c is None):
+            continue
+        if(c.getName() == "chiikawa"):
+            chii = c
+        elif(c.getName() == "hachiware"):
+            hachi = c
+    if(chii is None or hachi is None):
+        return
+    if(chii.drag or hachi.drag):
+        return
+    if(chii.physics_timer.isActive() or hachi.physics_timer.isActive()):
+        return  # mid-throw, wait for landing
+
+    #Require a real overlap, not a graze: shrink both rects a bit
+    ra = chii.frameGeometry().adjusted(10, 10, -10, -10)
+    rb = hachi.frameGeometry().adjusted(10, 10, -10, -10)
+    if(ra.intersects(rb)):
+        start_coanimation(chii, hachi)
+
+
+def _pause_for_coanim(char: 'Character'):
+    char.randomtimer.stop()
+    char.frame_timer.stop()
+    char.jump_frame_timer.stop()
+    char.held_timer.stop()
+    char.physics_timer.stop()
+    if(char.animation is not None):
+        char.animation.stop()
+    char.stop_current_sound()
+    char.onanimation = True  # block clicks while hidden
+    char.hide()
+
+
+def start_coanimation(a: 'Character', b: 'Character', forced: bool = False):
+    global current_coanim
+    if(current_coanim is not None):
+        return
+    print(f"coanimation start ({'forced' if forced else 'touch'})")
+    _pause_for_coanim(a)
+    _pause_for_coanim(b)
+    current_coanim = CoAnimation(a, b)
+    current_coanim.start()
+
+
+def end_coanimation(co: 'CoAnimation'):
+    global current_coanim, _coanim_next_ok
+    enabled, cd_min, cd_max = _coanim_config()
+    a, b = co.char_a, co.char_b
+    scr = QGuiApplication.screenAt(co.pos()) or QGuiApplication.primaryScreen()
+    rect = scr.availableGeometry()
+    center = co.pos().x() + co.width() // 2
+
+    for char, side in ((a, -1), (b, 1)):
+        try:
+            x = center + side * (char.width() // 2 + 30) - char.width() // 2
+            x = max(rect.left(), min(x, rect.right() - char.width()))
+            char.move(x, rect.bottom() - char.height() + 1)
+            char.setDefaultLabel()
+            char.onanimation = False
+            char.show()
+            char.randomtimer.start() # resume (don't use start_random_timer — it re-connects the signal)
+        except RuntimeError:
+            pass  # character was kicked mid-moment
+    co.hide()
+    co.deleteLater()
+    current_coanim = None
+    _coanim_next_ok = time.monotonic() + random.randint(int(cd_min), int(cd_max))
+    print(f"coanimation done, next possible in {int(_coanim_next_ok - time.monotonic())}s")
+
+
+def force_coanimation():
+    """Tray action: bring chiikawa and hachiware together on demand."""
+    chii = hachi = None
+    for c in characters:
+        if(c is None):
+            continue
+        if(c.getName() == "chiikawa"):
+            chii = c
+        elif(c.getName() == "hachiware"):
+            hachi = c
+    if(chii is None or hachi is None):
+        yaha_tray.showMessage('Wait!', 'Spawn both Chiikawa and Hachiware first!',
+                              QSystemTrayIcon.MessageIcon.Information, 500)
+        return
+    if(current_coanim is not None or chii.drag or hachi.drag):
+        return
+    start_coanimation(chii, hachi, forced=True)
+
+
 def create_character(name: str):
     
     name = name.lower() # lowercase to avoid compiling issues      
@@ -908,6 +1164,10 @@ hi_action.triggered.connect(say_hi_message)
 gather_action = tray_menu.addAction("Gather everyone!")
 gather_action.triggered.connect(lambda: gather_characters())
 
+#Chiikawa + Hachiware together-moment on demand
+together_action = tray_menu.addAction("Bring them together!")
+together_action.triggered.connect(lambda: force_coanimation())
+
 #Kick out a character
 kick_menu = QMenu("Kick")
 kick_menu.triggered.connect(lambda action: kick_character(action))
@@ -970,6 +1230,8 @@ def mute_character(name: str):
         muteall_button.setText("Unmute All" if muteall_flag else "Mute All")
     
 def gather_characters():
+    if(current_coanim is not None):
+        current_coanim.abort() # end the together-moment before teleporting anyone
     if(len(characters) == 0):
         yaha_tray.showMessage('Wait!', 'You have not spawned anyone yet!', QSystemTrayIcon.MessageIcon.Information, 500)
         return
@@ -990,6 +1252,9 @@ def gather_characters():
 
 def kick_character(action: QAction):
     charactername = action.text()
+    if(current_coanim is not None and charactername in ("chiikawa", "hachiware")):
+        current_coanim.abort() # release both pets before kicking one
+
     characters_names.remove(charactername)
     index = 0
     
@@ -1054,6 +1319,11 @@ setup_all_menus()
 #Auto-spawn Usagi on startup so opening the app visibly does something.
 #(On macOS the app lives in the menu bar only, which is easy to miss.)
 QTimer.singleShot(600, lambda: create_character("usagi"))
+
+#Touch detection: chiikawa + hachiware meeting triggers their together-moment.
+touch_timer = QTimer()
+touch_timer.timeout.connect(check_touch)
+touch_timer.start(500)
 
 app.exec()
 

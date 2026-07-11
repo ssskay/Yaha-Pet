@@ -16,13 +16,14 @@ A simple desktop pet application featuring characters from the "Chiikawa" univer
 * Interactive: Drag and drop the characters anywhere on your screen.
 * Throw Physics: flick a character and it goes flying — arcing, bouncing off screen edges, and crash-landing if you toss it hard enough. Gentle drops still float politely down.
 * Lively Animations: Features several sprite animations for different actions like walking and dancing.
-* Sound Effects: Characters have unique sounds for animations and interactions.
+* Sound Effects: Characters have unique sounds for animations and interactions. Chiikawa and Hachiware now have real anime voice clips (chiikawa cries when grabbed, of course).
+* Together Moment: If Chiikawa and Hachiware touch — by wandering into each other or being dropped together — they stroll off together and share a heart or hold hands before separating. Also available on demand via "Bring them together!" in the tray menu. Configurable via `config.json`: `{"coanimations": {"enabled": true, "cooldown_min_s": 60, "cooldown_max_s": 150}}`.
 * System Tray Control: Manage your spawned characters through a system tray icon menu.
 * Customizable: Don't like a certain animation? Sound is too loud? Change it all on the tray control.
 
-## 🍎 macOS Support
+## 🍎 How to Run on Mac (macOS)
 
-Yaha-Pet now runs natively on macOS! Download `Yaha-Pet-macOS.zip` from the Releases page, unzip, and open `Yaha-Pet.app` (right-click → Open the first time if Gatekeeper complains). Usagi spawns automatically; right-click the Dock icon for the full menu (Spawn Character, Gather everyone!, animations, and more).
+Yaha-Pet runs natively on Mac — Apple Silicon and Intel. Download `Yaha-Pet-macOS.zip` from the Releases page, unzip, and open `Yaha-Pet.app` (right-click → Open the first time if Gatekeeper complains). Usagi spawns automatically; right-click the Dock icon for the full menu (Spawn Character, Gather everyone!, animations, and more).
 
 To build from source on macOS:
 
@@ -30,13 +31,13 @@ To build from source on macOS:
 2. `pyinstaller --noconfirm --windowed --name Yaha-Pet --icon yaha.icns --add-data assets:assets "Yaha-Pet!.py"`
 3. The app appears in `dist/Yaha-Pet.app`
 
-macOS changes also include: a fix for a crash when grabbing characters (double-free of the grab sound player), a fix for the random-behavior roll so characters walk and dance instead of only jumping, a "Gather everyone!" menu action that recalls wandering pets to screen center, pets staying visible while other apps are focused, and a Dock menu.
+The Mac version also includes: a fix for a crash when grabbing characters (double-free of the grab sound player), a fix for the random-behavior roll so characters walk and dance instead of only jumping, a "Gather everyone!" menu action that recalls wandering pets to screen center, pets staying visible while other apps are focused, and a Dock menu.
 
 ## 🚀 How to Run (Windows)
 
-This application is intended for Windows users.
+The original Yaha-Pet is for Windows users.
 
-1.  Go to the Releases (https://github.com/gitChara-dot/Yaha-Pet/releases) page of this repository.
+1.  Go to the Releases (https://github.com/gitChara-dot/Yaha-Pet/releases) page of the original repository.
 2.  Download the latest `.zip` file (e.g., `Yaha-Pet-v1.0.zip`).
 3.  Unzip the downloaded file.
 4.  Run the `.exe` file inside the folder.

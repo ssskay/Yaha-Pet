@@ -13,3 +13,6 @@ __pycache__/
 !Yaha-Pet.spec
 config.json
 .DS_Store
+
+# Slimmed asset copy generated at build time (scripts/optimize-assets.sh)
+.assets-optimized/

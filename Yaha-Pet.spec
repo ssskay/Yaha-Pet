@@ -17,11 +17,17 @@ import os
 # None => ad-hoc / unsigned, so a bare `pyinstaller Yaha-Pet.spec` still works.
 codesign_identity = os.environ.get("CODESIGN_IDENTITY") or None
 
+# Which assets tree to bundle. release.sh sets YAHA_ASSETS_SRC to a downscaled
+# COPY (see scripts/optimize-assets.sh) so the shipped app is small; unset, we
+# fall back to the full-res masters so a bare `pyinstaller Yaha-Pet.spec` still
+# produces a working (if heavier) build.
+assets_src = os.environ.get("YAHA_ASSETS_SRC", "assets")
+
 a = Analysis(
     ['Yaha-Pet!.py'],
     pathex=[],
     binaries=[],
-    datas=[('assets', 'assets')],
+    datas=[(assets_src, 'assets')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
@@ -30,6 +36,27 @@ a = Analysis(
     noarchive=False,
     optimize=0,
 )
+
+# ---- Prune Qt weight we never ship -----------------------------------------
+# These filters run after PyInstaller's PyQt6 hook has collected everything, so
+# they trim what the hook over-includes. Both are macOS-safe for this app.
+#
+# 1. Qt translations (~7 MB): the app ships no translations of its own and Qt's
+#    English is built in. Keep only English .qm files, drop the rest.
+a.datas = [
+    d for d in a.datas
+    if "Qt6/translations" not in d[0].replace(os.sep, "/")
+    or "_en" in os.path.basename(d[0])
+]
+
+# 2. KEEP the QtMultimedia FFmpeg backend (~16 MB). It is tempting to drop it
+#    since the darwin backend (libdarwinmediaplugin) is also bundled, but
+#    QSoundEffect DECODES its WAV via QAudioDecoder, and on macOS that decode
+#    path relies on the FFmpeg backend - the darwin backend only handles
+#    playback. Removing libav*/libffmpegmediaplugin makes every sound silently
+#    fail to decode (no error, just no audio). Verified the hard way. Do not
+#    strip it unless you also replace QSoundEffect's decode path.
+
 pyz = PYZ(a.pure)
 
 exe = EXE(

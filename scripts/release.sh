@@ -38,6 +38,13 @@ NOTARY_PROFILE="AC_NOTARY"          # notarytool keychain profile name
 DIST_DIR="dist"                     # PyInstaller output dir
 DMG_BASENAME="${APP_NAME}-macOS"    # -> dist/Yaha-Pet-macOS.dmg
 
+# Asset slimming (see scripts/optimize-assets.sh). The shipped app bundles a
+# downscaled COPY of ASSETS_SRC_DIR; the masters are never modified. Set
+# ASSET_MAX_PX=0 to disable and ship full-res assets.
+ASSETS_SRC_DIR="assets"             # full-res masters (read-only input)
+ASSETS_OPT_DIR=".assets-optimized"  # generated slim copy (gitignored)
+ASSET_MAX_PX="${ASSET_MAX_PX:-768}" # longest-edge cap for shipped PNGs
+
 # PyInstaller invocation. Override with PYINSTALLER=/path/to/pyinstaller if it
 # is not on PATH (pip --user installs land in ~/Library/Python/X.Y/bin).
 PYINSTALLER="${PYINSTALLER:-pyinstaller}"
@@ -136,6 +143,19 @@ export CODESIGN_IDENTITY="$SIGN_ID"
 # ============================================================================
 phase "2/8  Build (pyinstaller --clean)"
 # ============================================================================
+
+# Generate the slimmed asset copy the bundle will ship. Written OUTSIDE build/
+# so `pyinstaller --clean` (which wipes build/) can't delete it. The spec reads
+# YAHA_ASSETS_SRC; unset, it would fall back to the full-res masters.
+if [ "$ASSET_MAX_PX" != "0" ]; then
+  log "slimming assets for the shipped bundle (masters untouched)"
+  bash "$SCRIPT_DIR/optimize-assets.sh" "$ASSETS_SRC_DIR" "$ASSETS_OPT_DIR" "$ASSET_MAX_PX"
+  export YAHA_ASSETS_SRC="$ASSETS_OPT_DIR"
+  ok "shipping downscaled assets from $ASSETS_OPT_DIR (max ${ASSET_MAX_PX}px)"
+else
+  warn "ASSET_MAX_PX=0 -> shipping full-resolution assets"
+fi
+
 log "cleaning previous build/ and dist/ for a reproducible result"
 "$PYINSTALLER" "$SPEC" --clean --noconfirm
 

@@ -23,7 +23,9 @@ A simple desktop pet application featuring characters from the "Chiikawa" univer
 
 ## 🍎 How to Run on Mac (macOS)
 
-Yaha-Pet runs natively on Mac — Apple Silicon and Intel. Download `Yaha-Pet-macOS.zip` from the Releases page, unzip, and open `Yaha-Pet.app` (right-click → Open the first time if Gatekeeper complains). Usagi spawns automatically; right-click the Dock icon for the full menu (Spawn Character, Gather everyone!, animations, and more).
+Download **[`Yaha-Pet-macOS.dmg`](https://github.com/ssskay/Yaha-Pet/releases/latest/download/Yaha-Pet-macOS.dmg)** from the [latest release](https://github.com/ssskay/Yaha-Pet/releases/latest), open it, and drag **Yaha-Pet.app** into Applications. The app is **signed and notarized by Apple**, so it just opens — no "unidentified developer" warning and no right-click → Open workaround. Usagi spawns automatically; right-click the Dock icon for the full menu (Spawn Character, Gather everyone!, animations, and more).
+
+> **Apple Silicon (M1–M4).** The release DMG is an `arm64` build. On an Intel Mac, build from source (below).
 
 To build from source on macOS:
 

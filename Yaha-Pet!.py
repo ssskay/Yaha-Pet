@@ -2,7 +2,7 @@ import os
 import sys
 import json
 import time
-from PyQt6.QtWidgets import QApplication, QWidget, QSystemTrayIcon, QMenu, QLabel
+from PyQt6.QtWidgets import QApplication, QWidget, QSystemTrayIcon, QMenu, QLabel, QMenuBar, QMessageBox
 from PyQt6.QtCore import Qt, QSize, QPoint, QUrl, QPropertyAnimation, QTimer, QEasingCurve
 from PyQt6.QtGui import QIcon, QGuiApplication, QPixmap, QAction
 from PyQt6.QtMultimedia import QSoundEffect
@@ -1089,8 +1089,7 @@ def create_character(name: str):
         kick_menu.addAction(name) #enable kicking the character
         muteall_button.setDisabled(False) # Enable the muteall button
         stop_animation_menu.setDisabled(False) # Enable the stop animations menu
-    else:
-        yaha_tray.showMessage('Fail', 'Character already spawned!', QSystemTrayIcon.MessageIcon.Information, 500)
+        refresh_spawn_state() # grey out this character in the Spawn menu / Spawn All
 
 
 #Setting up variables
@@ -1142,13 +1141,20 @@ yaha_tray.show()
 tray_menu = QMenu()
 
 ##Context Menu actions
-#Create character
+#Create character. Keep a handle on each spawn action (keyed by lowercase name)
+#so refresh_spawn_state() can grey out characters already on screen and re-enable
+#them when kicked - clearer than the old "already spawned" error.
 character_list_menu = QMenu("Spawn Character")
-character_list_menu.addAction("Usagi")
-character_list_menu.addAction("Hachiware")
-character_list_menu.addAction("Chiikawa")
+spawn_actions : dict = {}
+for _label in ("Usagi", "Hachiware", "Chiikawa"):
+    spawn_actions[_label.lower()] = character_list_menu.addAction(_label)
 character_list_menu.triggered.connect(lambda action: create_character(action.text()))
 tray_menu.addMenu(character_list_menu)
+
+#Spawn All: spawn everyone not already out. Greys out once all are on screen.
+spawn_all_action = QAction("Spawn All")
+spawn_all_action.triggered.connect(lambda: spawn_all())
+tray_menu.addAction(spawn_all_action)
 
 #Play animation
 play_animation_menu = QMenu("Play Animation")
@@ -1158,11 +1164,6 @@ tray_menu.addMenu(play_animation_menu)#Adding the play animation menu to the mai
 #Say hi
 hi_action = tray_menu.addAction("Say hi!")
 hi_action.triggered.connect(say_hi_message)
-
-#Gather everyone: teleports all characters back to the center of the screen.
-#Useful when a pet has wandered somewhere hard to find.
-gather_action = tray_menu.addAction("Gather everyone!")
-gather_action.triggered.connect(lambda: gather_characters())
 
 #Chiikawa + Hachiware together-moment on demand
 together_action = tray_menu.addAction("Bring them together!")
@@ -1202,6 +1203,54 @@ try:
 except AttributeError:
     print("setAsDockMenu not available on this platform")
 
+#macOS menu bar: mirror the same commands into a native top-of-screen menu bar so
+#they're discoverable without hunting for the tray/dock icon. We reuse the SAME
+#QAction/QMenu objects the tray uses, so dynamic state (submenus populated on
+#spawn, enabled/disabled) stays in sync automatically - single source of truth.
+YAHA_VERSION = "1.0.0"  # keep in sync with Yaha-Pet.spec BUNDLE version
+
+def show_about():
+    box = QMessageBox()
+    box.setWindowTitle("About Yaha-Pet")
+    box.setIconPixmap(yaha_icon.pixmap(96, 96))
+    box.setText(f"<b>Yaha-Pet</b> {YAHA_VERSION}")
+    box.setInformativeText(
+        "A desktop pet starring Usagi, Chiikawa, and Hachiware.\n\n"
+        "Spawn a character from the Characters menu, then use the Actions menu to "
+        "make them say hi, dance, or bring Chiikawa and Hachiware together.\n\n"
+        "Made with love · me.sarakay.YahaPet"
+    )
+    box.setStandardButtons(QMessageBox.StandardButton.Ok)
+    box.exec()
+
+menu_bar = QMenuBar()  # parentless -> becomes the application-wide menu bar on macOS
+
+#About -> macOS relocates AboutRole actions into the "Yaha-Pet" application menu.
+about_action = QAction("About Yaha-Pet")
+about_action.setMenuRole(QAction.MenuRole.AboutRole)
+about_action.triggered.connect(show_about)
+menu_bar.addAction(about_action)
+
+#Characters menu - spawning and per-character controls.
+characters_menu = menu_bar.addMenu("Characters")
+characters_menu.addAction(spawn_all_action)    # Spawn All (shared with tray)
+characters_menu.addMenu(character_list_menu)   # Spawn > (shared with tray)
+characters_menu.addMenu(kick_menu)             # Kick > (shared, enables on spawn)
+characters_menu.addSeparator()
+characters_menu.addAction(muteall_button)      # Mute All (shared)
+
+#Actions menu - fun things the spawned characters can do (room for more easter
+#eggs over time).
+actions_menu = menu_bar.addMenu("Actions")
+actions_menu.addAction(hi_action)              # Say hi! (shared)
+actions_menu.addAction(together_action)        # Bring them together! (shared)
+actions_menu.addMenu(play_animation_menu)      # Play Animation > (shared)
+actions_menu.addMenu(stop_animation_menu)      # Stop/Resume Random > (shared)
+
+#Quit -> macOS relocates QuitRole into the application menu as Quit (Cmd-Q).
+menu_bar.addAction(exit_action)
+exit_action.setMenuRole(QAction.MenuRole.QuitRole)
+
 #yahawindow.show() — disabled on macOS: this invisible fullscreen always-on-top
 #window intercepted clicks meant for other applications (on Windows, layered
 #windows pass clicks through transparent pixels automatically; macOS is less
@@ -1229,26 +1278,18 @@ def mute_character(name: str):
         #Reflect the state on the menu item so it works as a toggle
         muteall_button.setText("Unmute All" if muteall_flag else "Mute All")
     
-def gather_characters():
-    if(current_coanim is not None):
-        current_coanim.abort() # end the together-moment before teleporting anyone
-    if(len(characters) == 0):
-        yaha_tray.showMessage('Wait!', 'You have not spawned anyone yet!', QSystemTrayIcon.MessageIcon.Information, 500)
-        return
-    center_x = get_size().width()//2
-    offset = 0
-    for character in characters:
-        if(character != None and not character.drag):
-            print(f"Gathering {character.getName()}")
-            try:
-                if(character.getOnAnimation()):
-                    character.jump_frame_timer.stop()
-                    character.stop_current_animation()
-            except AttributeError:
-                pass # No animation has run yet, nothing to stop
-            character.move(center_x + offset - 120, 60)
-            character.fall_animation()
-            offset += 140
+def spawn_all():
+    #Spawn every character not already on screen.
+    for name in allcharacters:
+        if(name not in characters_names):
+            create_character(name)
+
+def refresh_spawn_state():
+    #Grey out characters already on screen in the Spawn menu, and disable Spawn
+    #All once everyone is out. Shared QAction objects update tray + menu bar at once.
+    for name, action in spawn_actions.items():
+        action.setDisabled(name in characters_names)
+    spawn_all_action.setDisabled(len(characters_names) >= len(allcharacters))
 
 def kick_character(action: QAction):
     charactername = action.text()
@@ -1270,10 +1311,11 @@ def kick_character(action: QAction):
         index+=1
     kick_menu.removeAction(action)
     if(not kick_menu.actions()): #iF THERE ARENT ANY ACTIONS, THERE ARENT ANY CHARACTERS ALIVE, DISABLE ALL RELEVANT MENUS
-        kick_menu.setDisabled(True) 
+        kick_menu.setDisabled(True)
         play_animation_menu.setDisabled(True)
         muteall_button.setDisabled(True)
         stop_animation_menu.setDisabled(True)
+    refresh_spawn_state() # this character can be spawned again now
 
 def setup_all_menus():
     #Let the user know that the app has been initialized

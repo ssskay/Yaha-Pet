@@ -10,5 +10,6 @@
 
 __pycache__/
 *.spec
+!Yaha-Pet.spec
 config.json
 .DS_Store

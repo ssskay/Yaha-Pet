@@ -49,6 +49,81 @@ The original Yaha-Pet is for Windows users.
     c. Go to "Taskbar Overflow" or "Other Taskbar Icons"
     d. Enable Yaha-Pet.
 
+## 🔏 Releasing (code signing & notarization)
+
+Release builds are signed with a **Developer ID Application** certificate and
+**notarized** by Apple, so users can download and open the app with no
+"unidentified developer" Gatekeeper warning. The whole pipeline is one script:
+
+```bash
+./scripts/release.sh            # full release: build → sign → notarize → staple → DMG
+./scripts/release.sh --dry-run  # build + sign + verify + DMG locally, never contacts Apple
+```
+
+Ship the resulting `dist/Yaha-Pet-macOS.dmg`.
+
+### One-time setup
+
+1. A **Developer ID Application** certificate installed in your login keychain
+   (verify with `security find-identity -v -p codesigning`).
+2. A **notarytool keychain profile** named `AC_NOTARY`, created once:
+   ```bash
+   xcrun notarytool store-credentials "AC_NOTARY" \
+     --apple-id "<your-apple-id>" --team-id "<TEAMID>" \
+     --password "<app-specific-password>"
+   ```
+   The app-specific password comes from appleid.apple.com (not your Apple ID
+   password). Verify with `xcrun notarytool history --keychain-profile "AC_NOTARY"`.
+3. `brew install create-dmg`, plus `PyQt6` and `pyinstaller`.
+
+### What the pipeline does, and why
+
+- **`pyinstaller Yaha-Pet.spec --clean`** rebuilds `dist/Yaha-Pet.app`. The spec
+  keeps **`upx=False`** deliberately — UPX rewrites Mach-O binaries in place and
+  corrupts any signature applied afterward. It is the single most common cause
+  of "signed fine, notarization rejected" with PyInstaller.
+- **Inside-out signing.** Every nested `.so`/`.dylib`/`.framework` (there are
+  ~100) is signed *first*, deepest code before its container, and the `.app`
+  bundle *last*. We never use `codesign --deep` — it's deprecated and silently
+  skips nested code. Every call uses `--options runtime` (hardened runtime,
+  required for notarization) and `--timestamp` (secure timestamp).
+- **Local verify** (`codesign --verify --deep --strict`) runs before any Apple
+  round-trip so mistakes are caught for free. (`--deep` is fine for *verifying* —
+  it's only wrong for *signing*.)
+- **Zip with `ditto -c -k --keepParent`**, never `zip` — plain zip breaks
+  framework symlinks and signatures.
+- **Notarize** the app, then the DMG, with `xcrun notarytool submit --wait`.
+  On failure the script auto-runs `notarytool log <id>` and prints Apple's
+  actual reason.
+- **Staple** the ticket into *both* the app and the DMG. Stapling the DMG is
+  what makes the very first open-from-download clean, with no network check.
+- **Gatekeeper gate:** `spctl` must report `source=Notarized Developer ID` or
+  the script exits non-zero.
+
+### The two entitlements (`entitlements.plist`)
+
+Under the hardened runtime, CPython needs exactly two exceptions. They live in
+`entitlements.plist`, which must be **comment-free** — `codesign` feeds it to
+Apple's AMFI parser, which rejects XML comments even though `plutil` accepts
+them.
+
+- **`com.apple.security.cs.allow-unsigned-executable-memory`** — the hardened
+  runtime forbids memory that is both writable and executable. CPython's
+  ctypes/libffi layer writes small machine-code trampolines at runtime and jumps
+  into them; PyQt6's `sip` bindings reach that path. Without this exception the
+  kernel kills the process on launch. Load-bearing here.
+- **`com.apple.security.cs.disable-library-validation`** — library validation
+  requires every loaded library to share the main executable's Team ID.
+  PyInstaller `dlopen`s dozens of bundled C extensions and Qt plugins at
+  runtime. Because `release.sh` re-signs *all* of them with the same Developer
+  ID, this one is a candidate for removal — try deleting it, re-run
+  `release.sh`, and if the app still notarizes **and** launches, you didn't need
+  it.
+
+**Audio needs no entitlement.** The app only *plays* sound (`QSoundEffect`); it
+never records. No microphone entitlement and no `NSMicrophoneUsageDescription`
+Info.plist key are required. Add both only if a future version captures audio.
+
 ## ⚠️ Disclaimer
 
 This is a non-profit fan project created for entertainment and educational purposes. All characters and associated assets from "Chiikawa" are the intellectual property of their original creator, Nagano. Please support the official work.

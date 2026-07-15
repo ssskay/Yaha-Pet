@@ -2,6 +2,7 @@ import os
 import sys
 import json
 import time
+import wave
 from PyQt6.QtWidgets import QApplication, QWidget, QSystemTrayIcon, QMenu, QLabel, QMenuBar, QMessageBox
 from PyQt6.QtCore import Qt, QSize, QPoint, QUrl, QPropertyAnimation, QTimer, QEasingCurve
 from PyQt6.QtGui import QIcon, QGuiApplication, QPixmap, QAction
@@ -790,22 +791,80 @@ class Character(QWidget):
         else:
             self.timer.timeout.connect(lambda: self.setDefaultLabel())
         
+#A co-animation "set" is one shared moment two or more pets play together. Each
+#entry is fully data-driven so new clips are add-a-dict, not edit-the-class:
+#  participants  character names that must all overlap for the touch to fire, and
+#                who is hidden/revealed around the clip. Order = left->right on end.
+#  frames_dir    folder under assets/coanimations/ holding {n}.png frames.
+#  sound         wav under assets/coanimations/sounds/.
+#  width_scale/  co-art bounding box as a multiple of one pet's char_size (the art
+#  height_scale  is scaled with KeepAspectRatio into this box).
+#  fps           nominal frame rate (loop-then-pose uses it directly; play-once
+#                only falls back to it when the wav is missing or muted).
+#  mode          "loop-then-pose": loop frames for walk_ms, then hold a random
+#                pose for pose_ms (chiikawa+hachiware today).
+#                "play-once": run every frame exactly once, timed so the last
+#                frame lands on the end of the audio, then finish (tanuki trio).
+#  poses         final-pose stickers for loop-then-pose (ignored by play-once).
+#  walk_ms/pose_ms  loop-then-pose timing.
+COANIM_SETS: dict[str, dict] = {
+    "hc_walktogether": {
+        "participants": ["chiikawa", "hachiware"],
+        "frames_dir": "hc_walktogether",
+        "sound": "together.wav",
+        "width_scale": 1.9,
+        "height_scale": 1.3,
+        "fps": 9,
+        "mode": "loop-then-pose",
+        "poses": ["hc_heart.png", "hc_handholding.png"],
+        "walk_ms": 3400,   # how long they stroll together
+        "pose_ms": 1800,   # how long the final pose is held
+    },
+    "tanuki_trio": {
+        "participants": ["chiikawa", "hachiware", "usagi"],
+        "frames_dir": "tanuki_trio",
+        "sound": "tanuki.wav",
+        "width_scale": 2.8,
+        "height_scale": 1.3,
+        "fps": 9,          # nominal fallback only; real timing derives from the wav
+        "mode": "play-once",
+        "poses": [],
+    },
+}
+
+
+def _wav_duration_ms(path: str):
+    """Duration of a PCM WAV in ms, or None if it can't be read. Used to sync a
+    play-once clip's frame timer to its audio so the last frame lands on the end
+    of the sound."""
+    try:
+        with wave.open(path, 'rb') as w:
+            frames = w.getnframes()
+            rate = w.getframerate()
+            if(rate <= 0):
+                return None
+            return int(frames * 1000 / rate)
+    except (wave.Error, OSError, EOFError):
+        return None
+
+
 class CoAnimation(QWidget):
-    """The 'touching' moment: when chiikawa and hachiware meet, both pets
-    hide and this widget plays their walk-together frames, then a final
-    heart/handholding pose, then they separate again.
+    """A shared 'touching' moment: the participating pets hide and this widget
+    plays a co-animation set (see COANIM_SETS), then the pets reappear on the
+    floor. Chiikawa+Hachiware loop-and-pose; the tanuki trio plays once through.
 
-    Assets (assets/coanimations/): hc_walktogether/{n}.png frame folder,
-    hc_heart.png / hc_handholding.png static poses, sounds/together.wav.
+    Assets live under assets/coanimations/: a <frames_dir>/{n}.png folder, any
+    pose stickers, and sounds/<sound>.
     """
-    WALK_FPS = 9
-    WALK_MS = 3400        # how long they stroll together
-    POSE_MS = 1800        # how long the final pose is held
-
-    def __init__(self, char_a: 'Character', char_b: 'Character'):
+    def __init__(self, set_name: str, participants: 'list[Character]'):
         super().__init__(parent=None)
-        self.char_a = char_a
-        self.char_b = char_b
+        self.set_name = set_name
+        self.spec = COANIM_SETS[set_name]
+        self.participants = participants
+        self.mode = self.spec.get("mode", "loop-then-pose")
+        self.fps = self.spec.get("fps", 9)
+        self.walk_ms = self.spec.get("walk_ms", 3400)
+        self.pose_ms = self.spec.get("pose_ms", 1800)
         self.finished = False
 
         self.setWindowFlag(Qt.WindowType.FramelessWindowHint)
@@ -819,22 +878,23 @@ class CoAnimation(QWidget):
         self.label = QLabel(parent=self)
         self.label.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        # co-art is two characters wide
-        char_size = char_a.char_size
-        self.co_size = QSize(int(char_size.width() * 1.9), int(char_size.height() * 1.3))
+        # co-art bounding box, sized off one pet and the set's scale factors
+        char_size = participants[0].char_size
+        self.co_size = QSize(int(char_size.width() * self.spec["width_scale"]),
+                             int(char_size.height() * self.spec["height_scale"]))
 
-        #Walk-together frames
+        #Frames
         self.walk_frames: list[QPixmap] = []
-        frames_dir = Path(resource_path('assets/coanimations/hc_walktogether'))
+        frames_dir = Path(resource_path(f'assets/coanimations/{self.spec["frames_dir"]}'))
         if frames_dir.exists():
             for f in sorted(frames_dir.glob('*.png'), key=lambda p: int(p.stem)):
                 pix = QPixmap(str(f)).scaled(self.co_size, Qt.AspectRatioMode.KeepAspectRatio,
                                              Qt.TransformationMode.SmoothTransformation)
                 self.walk_frames.append(pix)
 
-        #Final pose (random pick between the two stickers)
+        #Final pose (random pick among the set's stickers; play-once sets have none)
         self.pose_pixmap = None
-        poses = [p for p in ['hc_heart.png', 'hc_handholding.png']
+        poses = [p for p in self.spec.get("poses", [])
                  if Path(resource_path(f'assets/coanimations/{p}')).exists()]
         if poses:
             chosen = random.choice(poses)
@@ -847,14 +907,19 @@ class CoAnimation(QWidget):
         self.co_sound = QSoundEffect()
         self.co_sound.setVolume(0.5)
         self.co_sound.setLoopCount(1)
-        sound_path = resource_path('assets/coanimations/sounds/together.wav')
-        if Path(sound_path).exists():
+        sound_path = resource_path(f'assets/coanimations/sounds/{self.spec["sound"]}')
+        self.sound_available = Path(sound_path).exists()
+        self.sound_duration_ms = _wav_duration_ms(sound_path) if self.sound_available else None
+        if self.sound_available:
             self.co_sound.setSource(QUrl.fromLocalFile(sound_path))
 
         self.frame_idx = 0
         self.frame_timer = QTimer(self)
         self.frame_timer.timeout.connect(self._next_frame)
         self.walk_anim = None
+
+    def participant_names(self) -> 'list[str]':
+        return [c.getName() for c in self.participants]
 
     def _set_pix(self, pix: QPixmap):
         self.label.setPixmap(pix)
@@ -865,9 +930,10 @@ class CoAnimation(QWidget):
             self.setMask(mask)
 
     def start(self):
-        #Start at the midpoint of the two pets, snapped to the floor
-        mid_x = (self.char_a.pos().x() + self.char_b.pos().x()) // 2
-        scr = QGuiApplication.screenAt(self.char_a.pos()) or QGuiApplication.primaryScreen()
+        #Start at the midpoint of the participating pets, snapped to the floor
+        xs = [c.pos().x() for c in self.participants]
+        mid_x = sum(xs) // len(xs)
+        scr = QGuiApplication.screenAt(self.participants[0].pos()) or QGuiApplication.primaryScreen()
         rect = scr.availableGeometry()
 
         first = self.walk_frames[0] if self.walk_frames else self.pose_pixmap
@@ -883,29 +949,53 @@ class CoAnimation(QWidget):
         self.show()
         self.label.show()
 
-        if(not muteall_flag and not self.char_a.mutesounds):
-            self.co_sound.play()
+        muted = muteall_flag or self.participants[0].mutesounds
 
-        if self.walk_frames:
-            self.frame_timer.start(int(1000 / self.WALK_FPS))
-            #Stroll a little way together (stay on screen)
-            distance = random.randint(120, 240) * random.choice([-1, 1])
-            end_x = max(rect.left(), min(x + distance, rect.right() - self.width()))
-            self.walk_anim = QPropertyAnimation(self, b"pos")
-            self.walk_anim.setDuration(self.WALK_MS)
-            self.walk_anim.setEasingCurve(QEasingCurve.Type.InOutSine)
-            self.walk_anim.setStartValue(QPoint(x, y))
-            self.walk_anim.setEndValue(QPoint(end_x, y))
-            self.walk_anim.finished.connect(self._show_pose)
-            self.walk_anim.start()
+        #The frames are FRONT-FACING and this is a LOCKED SHOT: the pets look at
+        #the viewer and bob in place, with no left/right profile. There is no
+        #"facing" that a horizontal mirror could point at a travel direction —
+        #mirroring only swaps which pet is on which side. So any sideways slide
+        #makes the stationary bouncing feet glide across the floor, which reads
+        #as moonwalking regardless of direction (this is why the earlier
+        #frame-mirroring attempt couldn't fix it). The tanuki clip is likewise a
+        #stationary locked shot. So: never travel horizontally — hold the widget
+        #still and just cycle frames.
+        if self.mode == "play-once" and self.walk_frames:
+            #Sync the frame timer to the audio so the final frame lands on the end
+            #of the clip. Start the sound and the timer in the same tick.
+            if self.sound_available and not muted and self.sound_duration_ms:
+                interval = max(1, int(self.sound_duration_ms / len(self.walk_frames)))
+                self.co_sound.play()
+            else:
+                interval = int(1000 / self.fps)   # missing/muted wav -> nominal fps
+            self.frame_idx = 0
+            self.frame_timer.start(interval)
+        elif self.walk_frames:
+            #loop-then-pose: bounce happily in place for the walk duration, then
+            #settle into the final pose.
+            if(not muted):
+                self.co_sound.play()
+            self.frame_timer.start(int(1000 / self.fps))
+            QTimer.singleShot(self.walk_ms, self._show_pose)
         else:
+            if(not muted):
+                self.co_sound.play()
             self._show_pose()
 
     def _next_frame(self):
         if(not self.walk_frames):
             return
-        self.frame_idx = (self.frame_idx + 1) % len(self.walk_frames)
-        self._set_pix(self.walk_frames[self.frame_idx])
+        if self.mode == "play-once":
+            #Advance once through the frames; finish after the last frame has had
+            #its interval on screen (which lands on the end of the audio).
+            self.frame_idx += 1
+            if(self.frame_idx >= len(self.walk_frames)):
+                self._finish()
+                return
+            self._set_pix(self.walk_frames[self.frame_idx])
+        else:
+            self.frame_idx = (self.frame_idx + 1) % len(self.walk_frames)
+            self._set_pix(self.walk_frames[self.frame_idx])
 
     def _show_pose(self):
         self.frame_timer.stop()
@@ -915,7 +1005,7 @@ class CoAnimation(QWidget):
             old_center = self.pos().x() + self.width() // 2
             self._set_pix(self.pose_pixmap)
             self.move(old_center - self.width() // 2, old_bottom - self.height())
-        QTimer.singleShot(self.POSE_MS, self._finish)
+        QTimer.singleShot(self.pose_ms, self._finish)
 
     def _finish(self):
         if(self.finished):
@@ -934,47 +1024,58 @@ current_coanim: 'CoAnimation | None' = None
 last_coanim_end: float = 0.0
 
 
-def _coanim_config():
+def _coanim_config(set_name: str):
+    """(enabled, cooldown_min_s, cooldown_max_s) for a set. Cooldown is shared
+    across sets; the enabled flag is per-set under coanimations.sets.<name>,
+    falling back to a legacy top-level "enabled" then True."""
     cfg = config_data.get("coanimations", {})
-    return (
-        cfg.get("enabled", True),
-        cfg.get("cooldown_min_s", 60),
-        cfg.get("cooldown_max_s", 150),
-    )
+    cd_min = cfg.get("cooldown_min_s", 60)
+    cd_max = cfg.get("cooldown_max_s", 150)
+    set_cfg = cfg.get("sets", {}).get(set_name, {})
+    enabled = set_cfg.get("enabled", cfg.get("enabled", True))
+    return enabled, cd_min, cd_max
 
 
 _coanim_next_ok: float = 0.0
 
 
+def _resolve_participants(set_name: str):
+    """Return the live Character objects for a set's participants, or None if any
+    is missing / dragging / mid-throw (i.e. not ready to start the moment)."""
+    by_name = {c.getName(): c for c in characters if c is not None}
+    pets = []
+    for name in COANIM_SETS[set_name]["participants"]:
+        c = by_name.get(name)
+        if(c is None or c.drag or c.physics_timer.isActive()):
+            return None
+        pets.append(c)
+    return pets
+
+
 def check_touch():
-    """Runs on a timer: when chiikawa and hachiware overlap, play the
-    together-moment. Cooldown keeps it special."""
+    """Runs on a timer: when all of a set's participants overlap, play that
+    together-moment. Cooldown keeps it special. The rarer 3-way tanuki set is
+    checked BEFORE the pair, so it wins when all three overlap at once."""
     global current_coanim, _coanim_next_ok
-    enabled, cd_min, cd_max = _coanim_config()
-    if(not enabled or current_coanim is not None):
+    if(current_coanim is not None):
         return
     if(time.monotonic() < _coanim_next_ok):
         return
-    chii = hachi = None
-    for c in characters:
-        if(c is None):
-            continue
-        if(c.getName() == "chiikawa"):
-            chii = c
-        elif(c.getName() == "hachiware"):
-            hachi = c
-    if(chii is None or hachi is None):
-        return
-    if(chii.drag or hachi.drag):
-        return
-    if(chii.physics_timer.isActive() or hachi.physics_timer.isActive()):
-        return  # mid-throw, wait for landing
 
-    #Require a real overlap, not a graze: shrink both rects a bit
-    ra = chii.frameGeometry().adjusted(10, 10, -10, -10)
-    rb = hachi.frameGeometry().adjusted(10, 10, -10, -10)
-    if(ra.intersects(rb)):
-        start_coanimation(chii, hachi)
+    for set_name in ("tanuki_trio", "hc_walktogether"):
+        enabled, _cd_min, _cd_max = _coanim_config(set_name)
+        if(not enabled):
+            continue
+        pets = _resolve_participants(set_name)
+        if(pets is None):
+            continue
+        #Require a real overlap, not a graze: shrink every rect a bit, then
+        #require all of them to mutually intersect.
+        rects = [c.frameGeometry().adjusted(10, 10, -10, -10) for c in pets]
+        if(all(rects[i].intersects(rects[j])
+               for i in range(len(rects)) for j in range(i + 1, len(rects)))):
+            start_coanimation(set_name, pets)
+            return
 
 
 def _pause_for_coanim(char: 'Character'):
@@ -990,36 +1091,43 @@ def _pause_for_coanim(char: 'Character'):
     char.hide()
 
 
-def start_coanimation(a: 'Character', b: 'Character', forced: bool = False):
+def start_coanimation(set_name: str, participants: 'list[Character]', forced: bool = False):
     global current_coanim
     if(current_coanim is not None):
         return
-    print(f"coanimation start ({'forced' if forced else 'touch'})")
-    _pause_for_coanim(a)
-    _pause_for_coanim(b)
-    current_coanim = CoAnimation(a, b)
+    print(f"coanimation start: {set_name} ({'forced' if forced else 'touch'})")
+    for char in participants:
+        _pause_for_coanim(char)
+    current_coanim = CoAnimation(set_name, participants)
     current_coanim.start()
 
 
 def end_coanimation(co: 'CoAnimation'):
     global current_coanim, _coanim_next_ok
-    enabled, cd_min, cd_max = _coanim_config()
-    a, b = co.char_a, co.char_b
+    _enabled, cd_min, cd_max = _coanim_config(co.set_name)
+    pets = co.participants
     scr = QGuiApplication.screenAt(co.pos()) or QGuiApplication.primaryScreen()
     rect = scr.availableGeometry()
     center = co.pos().x() + co.width() // 2
 
-    for char, side in ((a, -1), (b, 1)):
+    #Spread the pets evenly around the widget's center (a 60px gap reproduces the
+    #old two-pet spacing exactly), each clamped to the screen rect. Order follows
+    #the set's participant list = left->right.
+    gap = 60
+    widths = [c.width() for c in pets]
+    total = sum(widths) + gap * (len(pets) - 1)
+    x = center - total // 2
+    for char, w in zip(pets, widths):
         try:
-            x = center + side * (char.width() // 2 + 30) - char.width() // 2
-            x = max(rect.left(), min(x, rect.right() - char.width()))
-            char.move(x, rect.bottom() - char.height() + 1)
+            cx = max(rect.left(), min(x, rect.right() - char.width()))
+            char.move(cx, rect.bottom() - char.height() + 1)
             char.setDefaultLabel()
             char.onanimation = False
             char.show()
             char.randomtimer.start() # resume (don't use start_random_timer — it re-connects the signal)
         except RuntimeError:
             pass  # character was kicked mid-moment
+        x += w + gap
     co.hide()
     co.deleteLater()
     current_coanim = None
@@ -1027,23 +1135,17 @@ def end_coanimation(co: 'CoAnimation'):
     print(f"coanimation done, next possible in {int(_coanim_next_ok - time.monotonic())}s")
 
 
-def force_coanimation():
-    """Tray action: bring chiikawa and hachiware together on demand."""
-    chii = hachi = None
-    for c in characters:
-        if(c is None):
-            continue
-        if(c.getName() == "chiikawa"):
-            chii = c
-        elif(c.getName() == "hachiware"):
-            hachi = c
-    if(chii is None or hachi is None):
-        yaha_tray.showMessage('Wait!', 'Spawn both Chiikawa and Hachiware first!',
+def force_coanimation(set_name: str):
+    """Tray action: play a co-animation set on demand, if its cast is present."""
+    if(current_coanim is not None):
+        return
+    pets = _resolve_participants(set_name)
+    if(pets is None):
+        names = ", ".join(n.capitalize() for n in COANIM_SETS[set_name]["participants"])
+        yaha_tray.showMessage('Wait!', f'Spawn {names} first!',
                               QSystemTrayIcon.MessageIcon.Information, 500)
         return
-    if(current_coanim is not None or chii.drag or hachi.drag):
-        return
-    start_coanimation(chii, hachi, forced=True)
+    start_coanimation(set_name, pets, forced=True)
 
 
 def create_character(name: str):
@@ -1102,6 +1204,11 @@ app = QApplication([])
 #             "animations": {"dance": {"fps": 40}}}}
 #sound_chance: probability (0-1) an animation sound actually plays.
 #animation_interval_scale: multiplier on time between random animations.
+#Co-animations (the shared touch-moments) are configured under "coanimations":
+#  {"coanimations": {"cooldown_min_s": 60, "cooldown_max_s": 150,
+#                    "sets": {"tanuki_trio": {"enabled": false}}}}
+#cooldown_min_s/max_s: shared min/max seconds between any auto-triggered moment.
+#sets.<name>.enabled: per-set toggle for the auto (touch) trigger; defaults True.
 config_data = {}
 _config_candidates = [
     os.path.join(Path.home(), "Library", "Application Support", "Yaha-Pet", "config.json"),
@@ -1167,7 +1274,11 @@ hi_action.triggered.connect(say_hi_message)
 
 #Chiikawa + Hachiware together-moment on demand
 together_action = tray_menu.addAction("Bring them together!")
-together_action.triggered.connect(lambda: force_coanimation())
+together_action.triggered.connect(lambda: force_coanimation("hc_walktogether"))
+
+#Chiikawa + Hachiware + Usagi tanuki trio moment on demand
+tanuki_action = tray_menu.addAction("Tanuki time!")
+tanuki_action.triggered.connect(lambda: force_coanimation("tanuki_trio"))
 
 #Kick out a character
 kick_menu = QMenu("Kick")
@@ -1244,6 +1355,7 @@ characters_menu.addAction(muteall_button)      # Mute All (shared)
 actions_menu = menu_bar.addMenu("Actions")
 actions_menu.addAction(hi_action)              # Say hi! (shared)
 actions_menu.addAction(together_action)        # Bring them together! (shared)
+actions_menu.addAction(tanuki_action)          # Tanuki time! (shared)
 actions_menu.addMenu(play_animation_menu)      # Play Animation > (shared)
 actions_menu.addMenu(stop_animation_menu)      # Stop/Resume Random > (shared)
 
@@ -1293,8 +1405,8 @@ def refresh_spawn_state():
 
 def kick_character(action: QAction):
     charactername = action.text()
-    if(current_coanim is not None and charactername in ("chiikawa", "hachiware")):
-        current_coanim.abort() # release both pets before kicking one
+    if(current_coanim is not None and charactername in current_coanim.participant_names()):
+        current_coanim.abort() # release the participating pets before kicking one
 
     characters_names.remove(charactername)
     index = 0

@@ -16,3 +16,10 @@ config.json
 
 # Slimmed asset copy generated at build time (scripts/optimize-assets.sh)
 .assets-optimized/
+.voice-rejected/
+.audio-originals/
+
+# Personal-use-only extras (Shadowverse voice lines, anime-cut dance/look
+# moments). Never committed, never bundled. See scripts/install-local-pack.sh.
+/local-pack/
+assets/*/sounds/voice/

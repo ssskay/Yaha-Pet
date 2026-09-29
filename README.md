@@ -19,7 +19,8 @@ A simple desktop pet application featuring characters from the "Chiikawa" univer
 * Interactive: Drag and drop the characters anywhere on your screen.
 * Throw Physics: flick a character and it goes flying — arcing, bouncing off screen edges, and crash-landing if you toss it hard enough. Gentle drops still float politely down.
 * Lively Animations: Features several sprite animations for different actions like walking and dancing.
-* Sound Effects: Characters have unique sounds for animations and interactions. Chiikawa and Hachiware now have real anime voice clips (chiikawa cries when grabbed, of course).
+* Sound Effects: Characters have unique sounds for animations and interactions.
+* Voice Lines (optional, bring your own): if you drop per-character clips into a local pack, each character greets you, yelps when grabbed, and says goodbye when kicked out. No voice clips ship with the app or live in this repo; see `scripts/install-local-pack.sh`. Toggle with **Voice Lines** in the tray menu.
 * Together Moment: If Chiikawa and Hachiware touch — by wandering into each other or being dropped together — they stroll off together and share a heart or hold hands before separating. Also available on demand via "Bring them together!" in the tray menu. Configurable via `config.json`: `{"coanimations": {"enabled": true, "cooldown_min_s": 60, "cooldown_max_s": 150}}`.
 * System Tray Control: Manage your spawned characters through a system tray icon menu.
 * Customizable: Don't like a certain animation? Sound is too loud? Change it all on the tray control.

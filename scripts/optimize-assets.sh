@@ -14,6 +14,8 @@
 #      (e.g. a 317 KB dance frame -> 21 KB). Frames stay .png files.
 #
 # WAVs and every other file are copied verbatim - sounds are kept exactly as-is.
+# The one exception is the voice .mp3 masters: QSoundEffect cannot play mp3, so
+# they are repo-only source for scripts/normalize-voice.sh and are skipped here.
 #
 #   optimize-assets.sh <src-dir> <out-dir> [max-px] [quality]
 #
@@ -40,6 +42,9 @@ HAVE_OXIPNG=0; command -v oxipng >/dev/null 2>&1 && HAVE_OXIPNG=1
 rm -rf "$OUT"
 mkdir -p "$OUT"
 cp -R "$SRC/." "$OUT/"
+
+# Drop the voice mp3 masters from the shipped copy (see note above).
+find "$OUT" -type f -name '*.mp3' -delete
 
 # 1. Downscale oversized frames.
 shrunk=0

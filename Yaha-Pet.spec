@@ -49,6 +49,28 @@ a.datas = [
     or "_en" in os.path.basename(d[0])
 ]
 
+# 1b. The voice .mp3 masters (~1.2 MB). They are the source the .wav files are
+#     regenerated from (scripts/normalize-voice.sh) and belong in the repo, but
+#     QSoundEffect cannot play mp3 - shipping them is pure download weight.
+a.datas = [d for d in a.datas if not d[0].lower().endswith(".mp3")]
+
+# 1a. Belt and braces: the personal-use local pack (voice lines, anime-cut
+#     moments) lives outside assets/ and is gitignored, but if a copy ever lands
+#     back under assets/ it still must not ship in the public DMG.
+_LOCAL_ONLY = ("/sounds/voice/", "/coanimations/chiikawa_dance", "/coanimations/hachiware_look",
+               "/coanimations/sounds/chiikawa_dance")
+a.datas = [d for d in a.datas if not any(k in d[0].replace(os.sep, "/") for k in _LOCAL_ONLY)]
+
+# 1c. QtPdf (~8.5 MB). PyInstaller's PyQt6 hook collects it wholesale; this app
+#     imports QtWidgets, QtCore, QtGui and QtMultimedia only, and never renders
+#     a PDF. Dropped from both lists because the framework arrives as binaries
+#     and its resources as datas.
+def _no_qtpdf(entries):
+    return [e for e in entries if "QtPdf" not in e[0].replace(os.sep, "/")]
+
+a.binaries = _no_qtpdf(a.binaries)
+a.datas = _no_qtpdf(a.datas)
+
 # 2. KEEP the QtMultimedia FFmpeg backend (~16 MB). It is tempting to drop it
 #    since the darwin backend (libdarwinmediaplugin) is also bundled, but
 #    QSoundEffect DECODES its WAV via QAudioDecoder, and on macOS that decode
@@ -95,5 +117,5 @@ app = BUNDLE(
     name='Yaha-Pet.app',
     icon='yaha.icns',
     bundle_identifier='me.sarakay.YahaPet',
-    version='1.0.0',
+    version='1.3',
 )

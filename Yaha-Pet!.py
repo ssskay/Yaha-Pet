@@ -3,9 +3,12 @@ import sys
 import json
 import time
 import wave
+import re
+import urllib.request
+import urllib.error
 from PyQt6.QtWidgets import QApplication, QWidget, QSystemTrayIcon, QMenu, QLabel, QMenuBar, QMessageBox
-from PyQt6.QtCore import Qt, QSize, QPoint, QUrl, QPropertyAnimation, QTimer, QEasingCurve
-from PyQt6.QtGui import QIcon, QGuiApplication, QPixmap, QAction
+from PyQt6.QtCore import Qt, QSize, QPoint, QUrl, QPropertyAnimation, QTimer, QEasingCurve, QThread, pyqtSignal
+from PyQt6.QtGui import QIcon, QGuiApplication, QPixmap, QAction, QActionGroup, QDesktopServices
 from PyQt6.QtMultimedia import QSoundEffect
 from pathlib import Path
 import random 
@@ -26,6 +29,145 @@ def resource_path(relative_path):
         base_path = os.path.abspath(".")
 
     return os.path.join(base_path, relative_path)
+
+#Local pack: licensed-for-personal-use extras (the Shadowverse voice lines, the
+#anime-cut dance/look moments) that must never ship in the repo or the public
+#DMG. They live outside assets/, mirroring its layout, in the first of:
+#  $YAHA_LOCAL_PACK  ->  ~/Library/Application Support/Yaha-Pet/local-pack  ->  ./local-pack
+#Install into Application Support with scripts/install-local-pack.sh. Anything
+#missing just falls back to the bundled assets/, or the feature quietly hides.
+def _local_pack_roots() -> 'list[str]':
+    roots = []
+    if os.environ.get("YAHA_LOCAL_PACK"):
+        roots.append(os.environ["YAHA_LOCAL_PACK"])
+    roots.append(os.path.join(Path.home(), "Library", "Application Support", "Yaha-Pet", "local-pack"))
+    roots.append(os.path.abspath("local-pack"))
+    return roots
+
+def asset_path(relative_path: str) -> str:
+    """Path to an asset, preferring the local pack over the bundled copy."""
+    for root in _local_pack_roots():
+        candidate = os.path.join(root, relative_path)
+        if os.path.exists(candidate):
+            return candidate
+    return resource_path(relative_path)
+
+def coanim_available(set_name: str) -> bool:
+    """True when a co-animation set's frames exist (bundled or local pack)."""
+    frames_dir = Path(asset_path(f'assets/coanimations/{COANIM_SETS[set_name]["frames_dir"]}'))
+    return frames_dir.exists() and any(frames_dir.glob('*.png'))
+
+#Voice lines: short in-character clips under assets/<name>/sounds/voice, named
+#NN_label.wav (01_greeting.wav -> "greeting"). They are gated three ways:
+#  - Mute All / per-character mute (self.mutesounds), like every other sound
+#  - the global "voice_lines" config key + the Voice Lines menu item
+#  - a per-character override, config_data[<name>]["voice_lines"]
+#Ambient lines (spawn greeting, victory, thanks) additionally roll the existing
+#per-character sound_chance; lines that answer a direct user action (grab, hard
+#throw, Say hi, kick) always speak, matching how "grabbed" sfx already behave.
+voice_lines_flag : bool = True
+
+def voice_enabled(name: 'str | None' = None) -> bool:
+    if(not voice_lines_flag):
+        return False
+    if(name is None):
+        return True
+    return bool(config_data.get(name, {}).get("voice_lines", True))
+
+#Which voice labels can answer each moment. One entry is picked at random, so
+#the mix IS the weighting — repeat a label to make it likelier. Every clip we
+#have is reachable from here. A label that isn't installed is simply skipped, so
+#trimming clips during vetting just narrows the pool it belongs to.
+VOICE_POOLS : dict = {
+    "spawn":   ["greeting"],
+    "launch":  ["start1", "start2"],                 # only the first pet of the session
+    #Being picked up is usually a yelp, but not always — some of them are
+    #delighted to be held, which is the whole joke.
+    "grab":    ["hurt1", "hurt2", "hurt3", "hurt4", "hurt5",
+                "greeting", "impressed", "thinking", "taunt"],
+    "crash":   ["shocked", "shocked", "shocked", "apology", "impressed"],
+    "bounce":  ["apology"],                          # clipped a wall mid-flight
+    "idle":    ["thinking", "taunt", "apology"],     # muttering to themselves
+    "dance":   ["victory", "evolve1", "evolve2", "evolve3"],
+    "coanim":  ["thanks", "thanks", "impressed"],
+    "despawn": ["concede1", "concede2"],
+}
+
+#Voice lines that stand in for a missing animation sfx. Vetting removed most of
+#chiikawa's and all of hachiware's original solo sounds, so their walks and jumps
+#had gone silent; these fill that space in-character rather than with nothing.
+#Only consulted when the animation's own .wav is absent, so any character that
+#kept its sfx is untouched.
+ANIM_VOICE_FALLBACK : dict = {
+    "walkleft":  ["thinking"],                      # humming to themselves as they wander
+    "walkright": ["thinking"],
+    "jumpleft":  ["evolve1", "evolve2", "evolve3"],  # the closest thing to a "hup!"
+    "jumpright": ["evolve1", "evolve2", "evolve3"],
+}
+
+session_started : bool = False # False until the first pet of the session speaks
+
+#Two dials the user can move from the menu, both persisted to config.json.
+#
+#CHATTINESS scales how often AMBIENT noise happens - random animation sounds,
+#idle mutters, victory lines. It multiplies the per-character sound_chance, so a
+#character tuned quiet in config stays relatively quieter at every setting.
+#Deliberately defaults below "normal": the pets were talking over each other.
+#Sounds that answer something the user just did (grabbing, throwing, Say hi,
+#kicking) ignore it - those aren't chatter, they're feedback.
+#
+#VOLUME scales every player. The per-player base levels below stay as they were;
+#this rides on top.
+CHATTINESS_LEVELS = [("Quiet", 0.2), ("Low", 0.45), ("Normal", 0.7), ("Chatty", 1.0)]
+VOLUME_LEVELS = [("25%", 0.25), ("50%", 0.5), ("75%", 0.75), ("100%", 1.0)]
+chattiness : float = 0.45   # "Low"
+master_volume : float = 1.0
+
+def effective_chance(name: str) -> float:
+    #Per-character chattiness from config, scaled by the global dial.
+    return config_data.get(name, {}).get("sound_chance", 1.0) * chattiness
+
+def vol(base: float) -> float:
+    #A player's base level, scaled by the global volume dial.
+    return max(0.0, min(1.0, base * master_volume))
+
+#SETTINGS PERSISTENCE
+USER_CONFIG_PATH = os.path.join(Path.home(), "Library", "Application Support",
+                                "Yaha-Pet", "config.json")
+
+def save_settings():
+    """Write the menu-controlled settings back to the user's config so they
+    survive a restart. Everything else already in that file (per-character
+    tuning, co-animation cooldowns) is preserved - we re-dump the loaded doc
+    with only our three keys updated."""
+    config_data["voice_lines"] = voice_lines_flag
+    config_data["chattiness"] = chattiness
+    config_data["volume"] = master_volume
+    try:
+        os.makedirs(os.path.dirname(USER_CONFIG_PATH), exist_ok=True)
+        with open(USER_CONFIG_PATH, 'w', encoding='utf-8') as f:
+            json.dump(config_data, f, indent=2)
+        print(f"settings saved to {USER_CONFIG_PATH}")
+    except OSError as e:
+        print(f"could not save settings: {e}")  # never let this break playback
+
+def set_chattiness(value: float):
+    global chattiness
+    chattiness = value
+    print(f"chattiness -> {value}")
+    save_settings()
+
+def set_volume(value: float):
+    global master_volume
+    master_volume = value
+    print(f"volume -> {value}")
+    save_settings()
+
+def toggle_voice_lines(enabled: bool):
+    global voice_lines_flag
+    voice_lines_flag = enabled
+    print(f"voice lines {'on' if enabled else 'off'}")
+    save_settings()
 
 #Functions
 def close_app():
@@ -60,13 +202,20 @@ def get_taskbar_height():
 def say_hi_message():
     if(len(characters_names)>0):
         name = random.choice(characters_names)
+        icon_path = QIcon(resource_path(f'assets/{name}/icons/icon.png'))
+        yaha_tray.showMessage(f'{name} says:','Hi!', icon_path, 500)
+
+        #Prefer the character's own greeting voice line; fall back to hi.wav when
+        #voice lines are off, missing, or the character is muted.
+        char = next((c for c in characters if c is not None and c.getName() == name), None)
+        if(char is not None and char.play_voice("greeting", ignore_chance=True)):
+            return
+        if(muteall_flag):
+            return
         #Setting the sound
         sound_path = resource_path(f'assets/{name}/sounds/hi.wav')
-        icon_path = QIcon(resource_path(f'assets/{name}/icons/icon.png'))
         sound.setSource(QUrl.fromLocalFile(sound_path))
-        sound.setVolume(0.5)
-        
-        yaha_tray.showMessage(f'{name} says:','Hi!', icon_path, 500)
+        sound.setVolume(vol(0.5))
         sound.setLoopCount(1)
         sound.play()
     else:
@@ -99,15 +248,29 @@ class Character(QWidget):
         self.grabplayer.setVolume(1)
         self.grabplayer.setLoopCount(1)
 
+        #Voice player, kept separate from the animation and grab players so a
+        #voice line can land without cutting an animation's own sound short.
+        self.voiceplayer = QSoundEffect()
+        self.voiceplayer.setVolume(0.6)
+        self.voiceplayer.setLoopCount(1)
+
+        #Voice lines: assets/<name>/sounds/voice/NN_label.wav -> {"greeting": path}
+        self.voice_lines : dict[str, str] = {}
+        voice_path = Path(asset_path(f'assets/{self.name}/sounds/voice'))
+        if voice_path.exists():
+            for file in sorted(voice_path.glob("*.wav")):
+                label = file.stem.split('_', 1)[-1] # "01_greeting" -> "greeting"
+                self.voice_lines[label] = str(file)
+            print(f"{self.name} voice lines: {sorted(self.voice_lines)}")
+
         #Sound Effects
-        self.grabbed_soundeffects = [] # List of all sound effects available when the character gets grabbed with mouse
+        self.grabbed_soundeffects = [] # Paths of the sound effects available when the character gets grabbed with mouse
         sound_effect_path = Path(resource_path(f'assets/{self.name}/sounds'))
         if sound_effect_path.exists():
             for file in sound_effect_path.iterdir():
                 file_name = file.name
                 if(file_name[0:7] == "grabbed" and file_name[-4:] == ".wav"):
-                    file_name = file_name[0:8] # leave only the name, remove extension
-                    self.grabbed_soundeffects.append(file_name)
+                    self.grabbed_soundeffects.append(str(file))
                     print(file_name)
             print(self.grabbed_soundeffects)
 
@@ -128,6 +291,7 @@ class Character(QWidget):
         self.physics_timer = QTimer()
         self.physics_timer.timeout.connect(self._physics_step)
         self.velocity = [0.0, 0.0] # px/s
+        self.bounced_voice = False # has this flight already used its wall-bounce line?
         self.pos_f = [0.0, 0.0]    # float position accumulator
 
         #Shake animation variables
@@ -243,19 +407,56 @@ class Character(QWidget):
                     self.play_animsound(animname)
     def play_animsound(self, animname:str ):
         #Per-character chattiness: sound_chance < 1.0 randomly skips some sounds
-        chance = config_data.get(self.name, {}).get("sound_chance", 1.0)
+        chance = effective_chance(self.name)
         if(random.random() > chance):
-            print(f"({self.name} kept quiet this time, sound_chance={chance})")
+            print(f"({self.name} kept quiet this time, chance={chance:.2f})")
             return
         self.soundplayer.setMuted(False)
+        self.soundplayer.setVolume(vol(0.5))
         self.soundplayer.setLoopCount(1)
         soundpath = resource_path(f'assets/{self.name}/sounds/{animname}.wav')
         print(f"sound: {soundpath}")
         if(Path.exists(Path(soundpath))):
             self.soundplayer.setSource(QUrl.fromLocalFile(soundpath))
             self.soundplayer.play()
+        elif(animname in ANIM_VOICE_FALLBACK):
+            #No sfx for this animation (vetted out, or never existed) - let them
+            #cover it with their voice instead. The chance roll already passed.
+            self.play_voice(*ANIM_VOICE_FALLBACK[animname], ignore_chance=True)
     def stop_current_sound(self):
         self.soundplayer.stop()
+
+    def play_voice(self, *labels: str, ignore_chance: bool = False) -> bool:
+        """Speak one of the named voice lines (random pick when several are given,
+        e.g. play_voice("concede1", "concede2")). Returns whether anything played,
+        so callers can fall back to an older sound. Honours mute, the voice_lines
+        toggle, and — unless ignore_chance — the per-character sound_chance."""
+        if(self.mutesounds or not voice_enabled(self.name)):
+            return False
+        choices = [self.voice_lines[label] for label in labels if label in self.voice_lines]
+        if(not choices):
+            return False
+        chance = effective_chance(self.name)
+        if(not ignore_chance and random.random() > chance):
+            print(f"({self.name} swallowed a voice line, chance={chance:.2f})")
+            return False
+        self.voiceplayer.stop()
+        self.voiceplayer.setMuted(False)
+        self.voiceplayer.setVolume(vol(0.6))
+        self.voiceplayer.setSource(QUrl.fromLocalFile(random.choice(choices)))
+        self.voiceplayer.play()
+        return True
+
+    def grab_sound_pool(self) -> list:
+        """The "grabbed" sfx plus, when voice lines are on, everything in the "grab"
+        voice pool — so being picked up can come out as a squeak, a yelp, or a
+        genuinely pleased noise. Rebuilt per grab so the Voice Lines menu item
+        takes effect immediately."""
+        pool = list(self.grabbed_soundeffects)
+        if(voice_enabled(self.name)):
+            pool += [self.voice_lines[label] for label in VOICE_POOLS["grab"]
+                     if label in self.voice_lines]
+        return pool
 
     def try_animation(self):
         screen_width = get_size().width()
@@ -263,6 +464,11 @@ class Character(QWidget):
         if(self.pos().x() < 0 or self.pos().x()>screen_width or self.pos().y()<0 or self.pos().y()>screen_height):
             self.move(self.clamp_to_screen(0,0))
         if(not self.onanimation and not self.drag):
+            #Sometimes they just mutter to themselves instead of moving. Only
+            #skips the animation if a line actually played (mute, the voice
+            #toggle and sound_chance can all veto it).
+            if(random.random() < 0.25 and self.play_voice(*VOICE_POOLS["idle"])):
+                return
             # Fixed behavior roll: original code always jumped (roll<=100 was always true).
             # Now: 40% jump, 30% walk, 30% random animation (dance etc.)
             roll = random.randrange(0,100)
@@ -438,24 +644,34 @@ class Character(QWidget):
             #print(self.walktocoord.x())
             self.current_frame_idx += 1
             
-        else: # If the current frame doesnt exist 
-            
+        else: # If the current frame doesnt exist
+
+            anim_name = self.current_anim_name # stop_current_animation clears it; keep it for the walk check below
             if(self.animation != None and self.animation.state() == QPropertyAnimation.State.Running): # If animation is still running, repeat the frames
                 self.current_frame_idx = 1
                 print("reseted frame")
             else:
                 print("reached")
                 self.stop_current_animation()
-            
-            
-            if(self.current_anim_name != "walkleft" and self.current_anim_name != "walkright"):  # Avoid changing the position for the walk ainmation
+
+
+            if(anim_name != "walkleft" and anim_name != "walkright"):  # Avoid changing the position for the walk ainmation
                 self.move(self.before_anim_pos) # Changes the position in order to adjust for different image sizes
     def stop_current_animation(self):
+        #Clear the animation name up front: it also decides whether a victory line
+        #is owed, and stop_current_animation is reachable from jump/walk callbacks
+        #that would otherwise re-fire a stale dance's line.
+        finished_anim = self.current_anim_name
+        self.current_anim_name = ''
         self.stop_current_sound()
-        self.animation.stop()
+        if(self.animation != None): # None until the first jump/walk — a tray-triggered dance can end before then
+            self.animation.stop()
         self.frame_timer.stop()  # Stop the timer
         self.setDefaultLabel() # Set default animation
         self.onanimation = False # Animation ended
+        #Any dance (dance, danceswirl, tapdance) earns a victory line.
+        if("dance" in finished_anim):
+            self.play_voice(*VOICE_POOLS["dance"])
 
     def blockAnimations(self):
         if(self.randomtimer.isActive()):
@@ -565,11 +781,12 @@ class Character(QWidget):
 
                 self.held_timer.timeout.connect(lambda: self.setLabelImage(self.shaken_image))
 
-                if(self.grabbed_soundeffects and not self.mutesounds):
-                    sound_chosen = random.choice(self.grabbed_soundeffects) # Choose a random "grabbed" sfx
-                    print(sound_chosen)
-                    sound_source = resource_path(f'assets/{self.name}/sounds/{sound_chosen}.wav')
+                grab_pool = self.grab_sound_pool()
+                if(grab_pool and not self.mutesounds):
+                    sound_source = random.choice(grab_pool) # Choose a random "grabbed" sfx or hurt line
+                    print(sound_source)
                     self.grabplayer.stop()
+                    self.grabplayer.setVolume(vol(1.0))
                     self.grabplayer.setSource(QUrl.fromLocalFile(sound_source))
                     self.grabplayer.play()
                         
@@ -643,6 +860,7 @@ class Character(QWidget):
         vy *= THROW_SCALE
         self.velocity = [max(-CAP, min(CAP, vx)), max(-CAP, min(CAP, vy))]
         self.pos_f = [float(self.pos().x()), float(self.pos().y())]
+        self.bounced_voice = False # one "sorry!" per flight, not one per wall
         self.setLabelImage(random.choice(self.sprites["falling"]))
         self.physics_timer.start(16)
 
@@ -666,9 +884,11 @@ class Character(QWidget):
         if(self.pos_f[0] < rect.left()):
             self.pos_f[0] = rect.left()
             self.velocity[0] = -self.velocity[0] * BOUNCE_WALL
+            self._wall_bounce_voice()
         elif(self.pos_f[0] > right_x):
             self.pos_f[0] = right_x
             self.velocity[0] = -self.velocity[0] * BOUNCE_WALL
+            self._wall_bounce_voice()
         if(self.pos_f[1] < rect.top()):
             self.pos_f[1] = rect.top()
             self.velocity[1] = -self.velocity[1] * 0.4
@@ -685,6 +905,14 @@ class Character(QWidget):
 
         self.move(int(self.pos_f[0]), int(self.pos_f[1]))
 
+    def _wall_bounce_voice(self):
+        #Clipped a screen edge mid-flight: apologise, but only for the first wall
+        #of a given throw — a fast flick can bounce several times in a second.
+        if(self.bounced_voice):
+            return
+        self.bounced_voice = True
+        self.play_voice(*VOICE_POOLS["bounce"], ignore_chance=True)
+
     def _end_throw(self, impact_speed: float):
         self.physics_timer.stop()
         self.move(int(self.pos_f[0]), int(self.pos_f[1]))
@@ -692,6 +920,7 @@ class Character(QWidget):
         #Hard landings leave them briefly crashed on the ground
         if(impact_speed > 400):
             self.setLabelImage(resource_path(f'assets/{self.name}/sprites/fallingend.png'))
+            self.play_voice(*VOICE_POOLS["crash"], ignore_chance=True) # you threw them; they get to react
             QTimer.singleShot(900, self.setDefaultLabel)
         else:
             self.setDefaultLabel()
@@ -830,6 +1059,46 @@ COANIM_SETS: dict[str, dict] = {
         "mode": "play-once",
         "poses": [],
     },
+    #Solo moment: Hachiware buzzes with excitement. Only two drawings exist in the
+    #source (a clean pose and a jittered one trailing its own smear); the 28 frames
+    #cycle them A,A,B, which is what makes the vibration read.
+    "hachiware_look": {
+        "participants": ["hachiware"],
+        "frames_dir": "hachiware_look",
+        "sound": "look.wav",   # not installed yet — awaiting Sara's ear; until then
+        "width_scale": 1.0,    # the missing wav just means nominal-fps timing
+        "height_scale": 1.0,
+        "fps": 9,
+        "mode": "play-once",
+        "poses": [],
+    },
+    #Chiikawa's solo "dodo dodo da do" dance, cut from the dance meme (ep dance
+    #clip). Two distinct ~7s periods of the same continuous dance: _dance is the
+    #bouncy front/arms phase, _dance2 the profile-turn phase. Pale-on-pale shot,
+    #so these were ink-matted (--matte ink) and the ground shadow removed to match
+    #the shadow-free house style. The spiky dashes are Chiikawa's own excited-
+    #shiver motion-smear, kept on purpose. Like hachiware_look, one-pet sets fire
+    #on demand from the tray, not check_touch.
+    "chiikawa_dance": {
+        "participants": ["chiikawa"],
+        "frames_dir": "chiikawa_dance",
+        "sound": "chiikawa_dance.wav",
+        "width_scale": 1.30,
+        "height_scale": 1.05,
+        "fps": 9,          # nominal fallback only; real timing derives from the wav
+        "mode": "play-once",
+        "poses": [],
+    },
+    "chiikawa_dance2": {
+        "participants": ["chiikawa"],
+        "frames_dir": "chiikawa_dance2",
+        "sound": "chiikawa_dance2.wav",
+        "width_scale": 1.15,
+        "height_scale": 1.05,
+        "fps": 9,          # nominal fallback only; real timing derives from the wav
+        "mode": "play-once",
+        "poses": [],
+    },
 }
 
 
@@ -885,7 +1154,7 @@ class CoAnimation(QWidget):
 
         #Frames
         self.walk_frames: list[QPixmap] = []
-        frames_dir = Path(resource_path(f'assets/coanimations/{self.spec["frames_dir"]}'))
+        frames_dir = Path(asset_path(f'assets/coanimations/{self.spec["frames_dir"]}'))
         if frames_dir.exists():
             for f in sorted(frames_dir.glob('*.png'), key=lambda p: int(p.stem)):
                 pix = QPixmap(str(f)).scaled(self.co_size, Qt.AspectRatioMode.KeepAspectRatio,
@@ -895,19 +1164,19 @@ class CoAnimation(QWidget):
         #Final pose (random pick among the set's stickers; play-once sets have none)
         self.pose_pixmap = None
         poses = [p for p in self.spec.get("poses", [])
-                 if Path(resource_path(f'assets/coanimations/{p}')).exists()]
+                 if Path(asset_path(f'assets/coanimations/{p}')).exists()]
         if poses:
             chosen = random.choice(poses)
-            self.pose_pixmap = QPixmap(resource_path(f'assets/coanimations/{chosen}')).scaled(
+            self.pose_pixmap = QPixmap(asset_path(f'assets/coanimations/{chosen}')).scaled(
                 self.co_size, Qt.AspectRatioMode.KeepAspectRatio,
                 Qt.TransformationMode.SmoothTransformation)
             print(f"coanimation pose: {chosen}")
 
         #Sound
         self.co_sound = QSoundEffect()
-        self.co_sound.setVolume(0.5)
+        self.co_sound.setVolume(vol(0.5))
         self.co_sound.setLoopCount(1)
-        sound_path = resource_path(f'assets/coanimations/sounds/{self.spec["sound"]}')
+        sound_path = asset_path(f'assets/coanimations/sounds/{self.spec["sound"]}')
         self.sound_available = Path(sound_path).exists()
         self.sound_duration_ms = _wav_duration_ms(sound_path) if self.sound_available else None
         if self.sound_available:
@@ -1128,6 +1397,14 @@ def end_coanimation(co: 'CoAnimation'):
         except RuntimeError:
             pass  # character was kicked mid-moment
         x += w + gap
+    #One of the cast speaks for the moment they just shared. A dance set gets the
+    #victory line instead of thanks — same "that was fun" beat, better word for it.
+    try:
+        speaker = random.choice(pets)
+        speaker.play_voice(*(VOICE_POOLS["dance"] if "dance" in co.set_name else VOICE_POOLS["coanim"]))
+    except RuntimeError:
+        pass  # character was kicked mid-moment
+
     co.hide()
     co.deleteLater()
     current_coanim = None
@@ -1168,6 +1445,12 @@ def create_character(name: str):
 
         
         character.play_animsound("spawn") #Play the spawn animation sound for the corresponding character
+        #...then speak, a beat later so the two sounds don't collide. The very
+        #first pet of the session announces the app with a match-start line.
+        global session_started
+        pool = VOICE_POOLS["spawn"] if session_started else VOICE_POOLS["launch"]
+        session_started = True
+        QTimer.singleShot(500, lambda: play_voice_later(character, *pool))
 
         characters.append(character) #Add character to alive widgets list
 
@@ -1209,6 +1492,9 @@ app = QApplication([])
 #                    "sets": {"tanuki_trio": {"enabled": false}}}}
 #cooldown_min_s/max_s: shared min/max seconds between any auto-triggered moment.
 #sets.<name>.enabled: per-set toggle for the auto (touch) trigger; defaults True.
+#Voice lines are on by default and switch off with a top-level {"voice_lines":
+#false} (mirrored by the Voice Lines menu item), or per character with
+#{"usagi": {"voice_lines": false}}.
 config_data = {}
 _config_candidates = [
     os.path.join(Path.home(), "Library", "Application Support", "Yaha-Pet", "config.json"),
@@ -1226,6 +1512,11 @@ for config_file in _config_candidates:
         continue
 else:
     print("No config file found, using defaults")
+
+voice_lines_flag = bool(config_data.get("voice_lines", True))
+chattiness = float(config_data.get("chattiness", chattiness))
+master_volume = float(config_data.get("volume", master_volume))
+
 #Setting the window and flags
 yahawindow = QWidget()
 yahawindow.setWindowFlag(Qt.WindowType.FramelessWindowHint) #  No title bar
@@ -1245,6 +1536,99 @@ icon_path = resource_path('assets/usagi/icons/usagi.ico')
 yaha_icon = QIcon(icon_path)
 yaha_tray = QSystemTrayIcon(yaha_icon,parent=app)
 yaha_tray.show()
+#UPDATE CHECK
+#
+#Yaha-Pet has no auto-updater: this only ASKS GitHub what the newest release is
+#and offers to open the download page. Everything here is best-effort and must
+#never be able to break the app - it runs on other people's machines, over a
+#network that may be missing, slow, captive-portalled or rate-limiting us. So:
+#a background thread (never block the UI), a hard timeout, and a bare except
+#that turns any failure into a quiet log line unless the user asked in person.
+UPDATE_REPO = "ssskay/Yaha-Pet"
+UPDATE_API = f"https://api.github.com/repos/{UPDATE_REPO}/releases/latest"
+UPDATE_PAGE = f"https://github.com/{UPDATE_REPO}/releases/latest"
+
+def _version_tuple(text: str):
+    #Release tags in this repo look like "v1.2-macos", so the patch component is
+    #optional and any suffix is ignored: "v1.2-macos" -> (1, 2, 0),
+    #"1.2.3-beta" -> (1, 2, 3). Unparseable -> None.
+    match = re.match(r'v?(\d+)\.(\d+)(?:\.(\d+))?', str(text).strip())
+    if(match is None):
+        return None
+    return tuple(int(g or 0) for g in match.groups())
+
+class UpdateCheck(QThread):
+    """One GitHub API call, off the UI thread. Emits (latest_tag, url, error) -
+    an empty error means the first two are good."""
+    done = pyqtSignal(str, str, str)
+
+    def run(self):
+        request = urllib.request.Request(UPDATE_API, headers={
+            "Accept": "application/vnd.github+json",
+            "User-Agent": f"Yaha-Pet/{YAHA_VERSION}"})
+        try:
+            with urllib.request.urlopen(request, timeout=8) as response:
+                data = json.loads(response.read().decode("utf-8"))
+            tag = str(data.get("tag_name") or "")
+            if(_version_tuple(tag) is None):
+                self.done.emit("", "", "GitHub returned no usable version number")
+                return
+            self.done.emit(tag, str(data.get("html_url") or UPDATE_PAGE), "")
+        except urllib.error.HTTPError as e:
+            hint = " (rate limited — try again later)" if e.code in (403, 429) else ""
+            self.done.emit("", "", f"GitHub replied {e.code}{hint}")
+        except Exception as e:
+            #Timeouts, DNS failures, TLS errors, captive portals, bad JSON. All
+            #of it is "no answer right now", none of it is worth a crash.
+            self.done.emit("", "", f"{type(e).__name__}: {e}")
+
+def _update_decision(latest: str, error: str, current: str):
+    """Pure decision step, split out from the dialogs so it can be tested:
+    returns ("error"|"current"|"newer"|"unknown", detail)."""
+    if(error):
+        return ("error", error)
+    newer, mine = _version_tuple(latest), _version_tuple(current)
+    if(newer is None or mine is None):
+        return ("unknown", latest)
+    return ("newer", latest) if newer > mine else ("current", latest)
+
+update_thread = None # kept alive; a GC'd QThread takes the signal with it
+
+def check_for_updates(manual: bool = False):
+    global update_thread
+    if(update_thread is not None and update_thread.isRunning()):
+        return
+    update_thread = UpdateCheck()
+    update_thread.done.connect(
+        lambda latest, url, err: _show_update_result(latest, url, err, manual))
+    update_thread.start()
+
+def _show_update_result(latest: str, url: str, error: str, manual: bool):
+    verdict, detail = _update_decision(latest, error, YAHA_VERSION)
+    if(verdict in ("error", "unknown")):
+        #A silent startup check that fails stays silent - no popup on a laptop
+        #that just happens to be offline.
+        if(manual):
+            QMessageBox.information(None, "Check for Updates",
+                                    f"Couldn't check right now.\n\n{detail}")
+        else:
+            print(f"update check: {detail}")
+        return
+    if(verdict == "newer"):
+        box = QMessageBox()
+        box.setWindowTitle("Update available")
+        box.setIconPixmap(yaha_icon.pixmap(64, 64))
+        box.setText(f"<b>Yaha-Pet {detail}</b> is out.")
+        box.setInformativeText(f"You have {YAHA_VERSION}. Open the download page?")
+        box.setStandardButtons(QMessageBox.StandardButton.Open |
+                               QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(QMessageBox.StandardButton.Open)
+        if(box.exec() == QMessageBox.StandardButton.Open):
+            QDesktopServices.openUrl(QUrl(url or UPDATE_PAGE))
+    elif(manual):
+        QMessageBox.information(None, "Check for Updates",
+                                f"You're on the latest version ({YAHA_VERSION}).")
+
 tray_menu = QMenu()
 
 ##Context Menu actions
@@ -1280,6 +1664,24 @@ together_action.triggered.connect(lambda: force_coanimation("hc_walktogether"))
 tanuki_action = tray_menu.addAction("Tanuki time!")
 tanuki_action.triggered.connect(lambda: force_coanimation("tanuki_trio"))
 
+#Hachiware's solo excited-buzz moment on demand (not in check_touch: a one-pet
+#set has no one to touch, so on-demand is its only trigger for now)
+look_action = tray_menu.addAction("Look!")
+look_action.triggered.connect(lambda: force_coanimation("hachiware_look"))
+
+#Chiikawa's solo "dodo dodo da do" dance moments on demand (two dance phases;
+#one-pet sets have no one to touch, so on-demand is their only trigger)
+dance_action = tray_menu.addAction("Chiikawa dance!")
+dance_action.triggered.connect(lambda: force_coanimation("chiikawa_dance"))
+dance2_action = tray_menu.addAction("Chiikawa dance 2!")
+dance2_action.triggered.connect(lambda: force_coanimation("chiikawa_dance2"))
+
+#Local-pack moments only show up in the menu when their frames are installed.
+for _act, _set in ((look_action, "hachiware_look"), (dance_action, "chiikawa_dance"), (dance2_action, "chiikawa_dance2")):
+    _act.setVisible(coanim_available(_set))
+    if not _act.isVisible():
+        print(f"local pack: {_set} not installed, hiding its menu item")
+
 #Kick out a character
 kick_menu = QMenu("Kick")
 kick_menu.triggered.connect(lambda action: kick_character(action))
@@ -1293,10 +1695,44 @@ muteall_button.setDisabled(True)
 tray_menu.addAction(muteall_button)
 muteall_button.triggered.connect(lambda: mute_character('all'))
 
+#Voice lines on/off. Checkable so the menu shows the current state; starts from
+#the config's "voice_lines" key and applies live to everyone on screen.
+voice_lines_action = QAction("Voice Lines")
+voice_lines_action.setCheckable(True)
+voice_lines_action.setChecked(voice_lines_flag)
+voice_lines_action.toggled.connect(toggle_voice_lines)
+tray_menu.addAction(voice_lines_action)
+
+#How often they make ambient noise, and how loud everything is. Both are radio
+#groups so the menu always shows the current setting, and both persist.
+def _level_menu(title: str, levels: list, current: float, apply):
+    menu = QMenu(title)
+    group = QActionGroup(menu)
+    group.setExclusive(True)
+    for label, value in levels:
+        act = QAction(label, menu)
+        act.setCheckable(True)
+        act.setChecked(abs(value - current) < 0.001)
+        act.triggered.connect(lambda _checked=False, v=value: apply(v))
+        group.addAction(act)
+        menu.addAction(act)
+    return menu
+
+chattiness_menu = _level_menu("Chattiness", CHATTINESS_LEVELS, chattiness, set_chattiness)
+volume_menu = _level_menu("Volume", VOLUME_LEVELS, master_volume, set_volume)
+tray_menu.addMenu(chattiness_menu)
+tray_menu.addMenu(volume_menu)
+
 #Stop animation menu
 stop_animation_menu = QMenu("Stop/Resume Random Animations of...")
 stop_animation_menu.setDisabled(True)
 tray_menu.addMenu(stop_animation_menu)
+
+#Check for updates, by hand. macOS convention puts this in the app menu, which
+#ApplicationSpecificRole achieves on the menu bar copy.
+update_action = QAction("Check for Updates…")
+update_action.triggered.connect(lambda: check_for_updates(manual=True))
+tray_menu.addAction(update_action)
 
 #Quit - Must always be last 
 exit_action = tray_menu.addAction("Exit")
@@ -1318,7 +1754,8 @@ except AttributeError:
 #they're discoverable without hunting for the tray/dock icon. We reuse the SAME
 #QAction/QMenu objects the tray uses, so dynamic state (submenus populated on
 #spawn, enabled/disabled) stays in sync automatically - single source of truth.
-YAHA_VERSION = "1.0.0"  # keep in sync with Yaha-Pet.spec BUNDLE version
+YAHA_VERSION = "1.3"  # keep in sync with Yaha-Pet.spec BUNDLE version and the
+                      # GitHub release tag (v1.3-macos), which the update check reads
 
 def show_about():
     box = QMessageBox()
@@ -1341,6 +1778,8 @@ about_action = QAction("About Yaha-Pet")
 about_action.setMenuRole(QAction.MenuRole.AboutRole)
 about_action.triggered.connect(show_about)
 menu_bar.addAction(about_action)
+update_action.setMenuRole(QAction.MenuRole.ApplicationSpecificRole)
+menu_bar.addAction(update_action)
 
 #Characters menu - spawning and per-character controls.
 characters_menu = menu_bar.addMenu("Characters")
@@ -1349,6 +1788,9 @@ characters_menu.addMenu(character_list_menu)   # Spawn > (shared with tray)
 characters_menu.addMenu(kick_menu)             # Kick > (shared, enables on spawn)
 characters_menu.addSeparator()
 characters_menu.addAction(muteall_button)      # Mute All (shared)
+characters_menu.addAction(voice_lines_action)  # Voice Lines (shared)
+characters_menu.addMenu(chattiness_menu)       # Chattiness > (shared)
+characters_menu.addMenu(volume_menu)           # Volume > (shared)
 
 #Actions menu - fun things the spawned characters can do (room for more easter
 #eggs over time).
@@ -1356,6 +1798,7 @@ actions_menu = menu_bar.addMenu("Actions")
 actions_menu.addAction(hi_action)              # Say hi! (shared)
 actions_menu.addAction(together_action)        # Bring them together! (shared)
 actions_menu.addAction(tanuki_action)          # Tanuki time! (shared)
+actions_menu.addAction(look_action)            # Look! (shared)
 actions_menu.addMenu(play_animation_menu)      # Play Animation > (shared)
 actions_menu.addMenu(stop_animation_menu)      # Stop/Resume Random > (shared)
 
@@ -1375,9 +1818,32 @@ available_coop_animations : dict[str, list[str]] = {}
 
 #Declaring variables for future use and keeping them alive from garbage collection
 sound = QSoundEffect()
+farewell_sound = QSoundEffect() # outlives the character it says goodbye for
 characters = [] # List to hold character instances
 characters_names = [] # List to hold current alive characters
 CHAR_CODES : dict[str, str] = {"usagi": "u", "hachiware": "h", "chiikawa": "c"}
+
+#VOICE HELPERS
+def play_voice_later(char: 'Character', *labels: str):
+    #Deferred voice line, tolerating the pet being kicked before the timer fires.
+    try:
+        char.play_voice(*labels)
+    except RuntimeError:
+        pass
+
+def play_farewell(char: 'Character'):
+    #Concede line on despawn. The character (and its own QSoundEffect) is deleted
+    #immediately after being kicked, so this plays on a module-level player.
+    if(char.mutesounds or muteall_flag or not voice_enabled(char.getName())):
+        return
+    paths = [char.voice_lines[label] for label in VOICE_POOLS["despawn"]
+             if label in char.voice_lines]
+    if(not paths):
+        return
+    farewell_sound.setVolume(vol(0.6))
+    farewell_sound.setLoopCount(1)
+    farewell_sound.setSource(QUrl.fromLocalFile(random.choice(paths)))
+    farewell_sound.play()
 
 #MENU FUNCTIONS
 def mute_character(name: str):
@@ -1413,7 +1879,8 @@ def kick_character(action: QAction):
     
     for target in characters: # For every character in alive characters list
         if(target != None):
-            if(target.getName() == charactername): 
+            if(target.getName() == charactername):
+                play_farewell(target) # must fire before the widget (and its player) dies
                 characters.remove(target)
                 target.setAssociatedStopButton(None)
                 target.setAssociatedPlayButton(None)
@@ -1473,6 +1940,11 @@ setup_all_menus()
 #Auto-spawn Usagi on startup so opening the app visibly does something.
 #(On macOS the app lives in the menu bar only, which is easy to miss.)
 QTimer.singleShot(600, lambda: create_character("usagi"))
+
+#Quiet update check a few seconds in, so it never competes with startup and
+#never interrupts anyone who is offline. Opt out with {"check_updates": false}.
+if(config_data.get("check_updates", True)):
+    QTimer.singleShot(4000, lambda: check_for_updates(manual=False))
 
 #Touch detection: chiikawa + hachiware meeting triggers their together-moment.
 touch_timer = QTimer()

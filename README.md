@@ -5,7 +5,7 @@
 <!-- sarakay.me/downloads -->
 **[⬇ Download for Mac (Apple Silicon)](https://sarakay.me/get/yaha-pet/mac-arm64)** · [all formats & checksums](https://sarakay.me/downloads.html#yaha-pet)
 
-![Usagi walking along the bottom of a Mac desktop, in three poses](docs/usagi-on-desktop.png)
+![Usagi, Hachiware and Chiikawa on a Mac desktop: Usagi hops over while Chiikawa sends hearts](docs/yaha-pets.gif)
 
 **Usagi, Hachiware, and Chiikawa live on your Mac's desktop.** If you searched for a *"chiikawa desktop pet for Mac"* — this is the native macOS version (Apple Silicon M1/M2/M3/M4, no emulator needed; Intel Macs can build from source). Download from the [Releases](../../releases) page.
 
@@ -24,6 +24,9 @@ A simple desktop pet application featuring characters from the "Chiikawa" univer
 * Sound Effects: Characters have unique sounds for animations and interactions.
 * Voice Lines (optional, bring your own): if you drop per-character clips into a local pack, each character greets you, yelps when grabbed, and says goodbye when kicked out. No voice clips ship with the app or live in this repo; see `scripts/install-local-pack.sh`. Toggle with **Voice Lines** in the tray menu.
 * Together Moment: If Chiikawa and Hachiware touch — by wandering into each other or being dropped together — they stroll off together and share a heart or hold hands before separating. Also available on demand via "Bring them together!" in the tray menu. Configurable via `config.json`: `{"coanimations": {"enabled": true, "cooldown_min_s": 60, "cooldown_max_s": 150}}`.
+
+  ![Hachiware and Chiikawa meet up, cuddle, and stroll apart with a heart](docs/together-moment.gif)
+
 * System Tray Control: Manage your spawned characters through a system tray icon menu.
 * Customizable: Don't like a certain animation? Sound is too loud? Change it all on the tray control.
 

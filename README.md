@@ -5,6 +5,8 @@
 <!-- sarakay.me/downloads -->
 **[⬇ Download for Mac (Apple Silicon)](https://sarakay.me/get/yaha-pet/mac-arm64)** · [all formats & checksums](https://sarakay.me/downloads.html#yaha-pet)
 
+![Usagi walking along the bottom of a Mac desktop, in three poses](docs/usagi-on-desktop.png)
+
 **Usagi, Hachiware, and Chiikawa live on your Mac's desktop.** If you searched for a *"chiikawa desktop pet for Mac"* — this is the native macOS version (Apple Silicon M1/M2/M3/M4, no emulator needed; Intel Macs can build from source). Download from the [Releases](../../releases) page.
 
 This is a Mac port of [**Yaha-Pet** by gitChara-dot](https://github.com/gitChara-dot/Yaha-Pet) — all credit for the original app, art, and sounds goes to them. **On Windows?** Use [the original](https://github.com/gitChara-dot/Yaha-Pet/releases), it's great.
